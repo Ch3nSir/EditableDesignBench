@@ -64,11 +64,13 @@ def python_path(value):
 def model_ids(selector='all',available=None):
     defaults=list(getattr(model_registry,'DEFAULT_MODELS',tuple(MODEL_CONFIGS)))
     allowed=list(available) if available is not None else defaults
-    selected=([name for name in defaults if name in allowed] if available is not None else defaults) if selector=='all' else selector.split(',')
+    selected=allowed if selector=='all' else selector.split(',')
     if not selected or any(not value or value!=value.strip() for value in selected) or len(set(selected))!=len(selected):
         raise ValueError('--models requires all or distinct comma-separated IDs')
-    unknown=set(selected)-set(MODEL_CONFIGS)
+    unknown=set(selected)-set(allowed if available is not None else MODEL_CONFIGS)
     if unknown:raise ValueError('Unknown model IDs: '+', '.join(sorted(unknown)))
+    if any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',name) for name in selected):
+        raise ValueError('Invalid model ID')
     if available is not None and set(selected)-set(allowed):raise ValueError('Selected model is not in this experiment')
     return selected
 
@@ -127,7 +129,7 @@ def plan_experiment(args):
     if previous is not None:
         for key in ('schema_version','dataset_root','case_ids','run_id','resolution_protocol'):
             if previous.get(key)!=experiment[key]:raise ValueError('Experiment dataset/selection/run identity changed; use a new output root')
-        experiment['models']=[name for name in MODEL_CONFIGS if name in set(previous.get('models',[]))|set(selected)]
+        experiment['models']=list(dict.fromkeys([*previous.get('models',[]),*selected]))
     write_json(path,experiment)
     return root,dataset,experiment,selected
 
@@ -139,6 +141,7 @@ def generate_command(args,root,dataset,experiment,model):
     if getattr(args,'cpu_offload',None) is not None:
         command.append('--cpu-offload' if args.cpu_offload else '--no-cpu-offload')
     if args.preflight:command.append('--preflight')
+    if getattr(args,'model_config',None) is not None:command.extend(['--model-config',str(args.model_config)])
     return command
 
 
@@ -360,14 +363,19 @@ def compare(args):
 
 def parser():
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)
+    listing=sub.add_parser('list-models',help='List built-in and additional Diffusers model profiles')
+    listing.add_argument('--model-config',type=Path)
+    listing.add_argument('--python',default=sys.executable)
     check=sub.add_parser('check-env',help='Check installed dependencies and pipeline imports')
     check.add_argument('--python',default=sys.executable);check.add_argument('--prepare-metrics',action='store_true')
     download=sub.add_parser('download',help='Download pinned registered checkpoints')
     download.add_argument('--models',default='all');download.add_argument('--output-root',type=Path,default=MODEL_ROOT)
+    download.add_argument('--model-config',type=Path,help='Additional Diffusers model profiles in JSON')
     download.add_argument('--metadata-only',action='store_true');download.add_argument('--max-workers',type=int,default=4)
     download.add_argument('--python',default=sys.executable)
     generate_p=sub.add_parser('generate',help='Generate each selected model into an isolated directory')
     generate_p.add_argument('--models',default='all');generate_p.add_argument('--dataset-root',type=Path,default=DATASET_ROOT)
+    generate_p.add_argument('--model-config',type=Path,help='Additional Diffusers model profiles in JSON')
     generate_p.add_argument('--output-root',required=True,type=Path);generate_p.add_argument('--run-id')
     scope=generate_p.add_mutually_exclusive_group(required=True)
     scope.add_argument('--all',action='store_true');scope.add_argument('--ids');scope.add_argument('--smoke',action='store_true')
@@ -398,12 +406,21 @@ def main(argv=None):
     args=parser().parse_args(argv);args.python=python_path(args.python)
     if getattr(args,'config',None) is not None:args.config=args.config.resolve()
     try:
+        if getattr(args,'model_config',None) is not None:
+            args.model_config=args.model_config.resolve()
+            model_registry.load_model_config(args.model_config)
+        if args.command=='list-models':
+            print(json.dumps({'default_models':list(model_registry.DEFAULT_MODELS),'models':[
+                {'id':name,'repo_id':config['repo_id'],'pipeline':config['pipeline'],
+                 'steps':config['num_inference_steps']} for name,config in MODEL_CONFIGS.items()]},indent=2))
+            return 0
         if args.command=='check-env':return check_environment(args)
         if args.command=='download':
             model_ids(args.models)
             command=[args.python,str(SCRIPTS/'download_models.py'),'--models',args.models,'--output-root',str(args.output_root.resolve()),
                      '--max-workers',str(args.max_workers)]
             if args.metadata_only:command.append('--metadata-only')
+            if args.model_config is not None:command.extend(['--model-config',str(args.model_config)])
             return run_command(command)
         return {'generate':generate,'evaluate':evaluate,'compare':compare}[args.command](args)
     except Exception as exc:

@@ -70,11 +70,44 @@ class BenchCLITests(unittest.TestCase):
             self.assertIn('--preflight',command)
         self.assertEqual(len({command[command.index('--output-dir')+1] for command in self.calls}),2)
 
+    def test_custom_config_is_forwarded_to_local_and_slurm_generators_and_downloader(self):
+        config=self.root/'extra models.json'
+        profile=bench.model_registry.get_model_config('qwen-edit-2511')
+        profile.pop('local_dir')
+        config.write_text(json.dumps({'models':{'custom-edit':profile}}))
+        with patch.dict(bench.MODEL_CONFIGS),patch.object(bench,'run_command',side_effect=self.local):
+            args=self.generate_args('--model-config',str(config),'--preflight')
+            args[args.index('--models')+1]='custom-edit'
+            self.assertEqual(self.invoke(*args),0)
+            command=self.calls[-1]
+            self.assertEqual(command[command.index('--model-config')+1],str(config.resolve()))
+            with patch.object(bench.subprocess,'run',side_effect=self.scheduler):
+                args.remove('--preflight');args.append('--submit')
+                self.assertEqual(self.invoke(*args),0)
+            jobs=json.loads((self.experiment/'jobs.json').read_text())
+            script=Path(jobs['entries']['generate:custom-edit']['script']).read_text()
+            self.assertIn('--model-config',script);self.assertIn(str(config),script)
+            self.assertEqual(self.invoke('download','--models','custom-edit','--model-config',str(config)),0)
+            self.assertIn(str(config),self.calls[-1])
+
+    def test_evaluate_and_compare_all_include_optional_and_custom_experiment_models(self):
+        self.models=['qwen-edit-2511','custom-api-model']
+        with patch.dict(bench.MODEL_CONFIGS,{'custom-api-model':bench.MODEL_CONFIGS['qwen-edit-2511']}):
+            self.make_protocols()
+        with patch.object(bench,'run_command',side_effect=self.local):
+            self.assertEqual(self.invoke('evaluate','--runs-root',str(self.experiment),'--pixel-only'),0)
+            self.assertEqual(self.invoke('compare','--runs-root',str(self.experiment),'--pixel-only'),0)
+        evaluated=[c for c in self.calls if Path(c[1]).name=='evaluate.py']
+        self.assertEqual(len(evaluated),2)
+        command=self.calls[-1]
+        self.assertEqual(command[command.index('--models')+1],','.join(self.models))
+
     def test_default_all_uses_registry_default_profile_not_optional_models(self):
         defaults=bench.model_ids()
         with patch.object(bench.model_registry,'DEFAULT_MODELS',tuple(defaults[:1]),create=True):
             self.assertEqual(bench.model_ids(),defaults[:1])
-            self.assertEqual(bench.model_ids('all',defaults),defaults[:1])
+            # Evaluation's all includes every model recorded in the experiment.
+            self.assertEqual(bench.model_ids('all',defaults),defaults)
         with self.assertRaises(ValueError):bench.model_ids(self.models[0],[self.models[1]])
 
     def test_experiment_selection_is_immutable(self):

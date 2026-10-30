@@ -82,7 +82,7 @@ OPENAI_MODEL=gpt-6-luna
 
 ## 4. 生成模型结果
 
-如果已经有模型结果，可以直接使用下方“评测已有图片”部分。
+生成和评分支持多个模型。内置六种模型配置，也可以通过 JSON 增加兼容的 Diffusers 模型；使用其他推理框架或 API 时，可以提交生成好的图片，见下方“评测已有图片”。
 
 ### 下载模型
 
@@ -90,13 +90,22 @@ OPENAI_MODEL=gpt-6-luna
 python scripts/bench.py download --models all
 ```
 
-权重默认放在 `models/`。`all` 包含以下三个模型：
+权重默认放在 `models/`。`--models all` 是默认三模型组合：`flux3-klein,qwen-image21,qwen-image21-turbo`。完整的内置配置如下，可以用 ID 单独选择或用逗号组合：
 
 | 模型 ID | 官方仓库 | 步数 |
 |---|---|---:|
 | `flux3-klein` | [FLUX 3 Image Klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) | 16 |
 | `qwen-image21` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | 40 |
 | `qwen-image21-turbo` | [Qwen-Image-2.1-Turbo](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo) | 8 |
+| `qwen-edit-2511` | [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) | 40 |
+| `flux2-klein-9b` | [FLUX.2 Klein 9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | 4 |
+| `flux2-dev` | [FLUX.2 Dev](https://huggingface.co/black-forest-labs/FLUX.2-dev) | 50 |
+
+表中是本仓库的采样配置。后三种模型已有调用参数、依赖和权重完整性检查；当前版本尚未完成它们在本数据集上的真实 GPU 生成测试。先用一例确认显存和输出尺寸再运行全量。查看当前全部模型 ID：
+
+```bash
+python scripts/bench.py list-models
+```
 
 如模型仓库要求授权，先在对应页面接受许可，再运行 `hf auth login`。FLUX 3 的官方本地提示词扩写器会一并下载；它是模型组件，不调用评委 API。扩写后的提示词另存记录，评分始终使用原始编辑指令。Turbo 使用权重自带的 8 步采样日程。
 
@@ -114,6 +123,62 @@ python scripts/bench.py generate \
 本地模式按模型顺序运行，并在模型之间释放进程。也可以只运行一个模型，例如 `--models flux3-klein`；多个模型用逗号分隔。显存不足时可以添加 `--cpu-offload`。
 
 默认路径可以在 `.env` 中用 `EDITABLEDESIGNBENCH_MODEL_ROOT` 和 `EDITABLEDESIGNBENCH_DATASET_ROOT` 修改。输出保留原生画布，仅在右侧和底部补边到 32 的倍数；原始返回图片完整保存，评测时只去掉额外补边。
+
+### 选择其他内置模型
+
+例如同时测试 Qwen-Image-Edit-2511 和 FLUX.2 Klein 9B：
+
+```bash
+python scripts/bench.py download --models qwen-edit-2511,flux2-klein-9b
+
+python scripts/bench.py generate \
+  --models qwen-edit-2511,flux2-klein-9b \
+  --ids 000_delete \
+  --output-root outputs/more_models
+
+python scripts/bench.py evaluate \
+  --runs-root outputs/more_models \
+  --models all \
+  --config config/judge.json \
+  --device cuda
+```
+
+**评分和汇总时的 `--models all` 表示该实验目录里的全部模型**，包括额外模型；下载和生成时则表示上面的默认三模型组合。若要生成全部六种内置模型，下载和生成命令均使用 `--models flux3-klein,qwen-image21,qwen-image21-turbo,qwen-edit-2511,flux2-klein-9b,flux2-dev`。
+
+### 接入新的 Diffusers 模型
+
+无需修改源码，复制模型配置模板：
+
+```bash
+cp config/models.example.json config/models.json
+```
+
+模板用 Qwen-Image-Edit-2511 演示一个额外配置 ID `my-qwen-edit`。接入其他模型时，按该模型的推理方式修改仓库 ID、Diffusers 类名、源码位置、采样参数和完整组件目录列表。`local_dir` 是 `models/` 下独立的文件夹名，不能覆盖其他模型目录。
+
+```bash
+python scripts/bench.py list-models --model-config config/models.json
+python scripts/bench.py download --models my-qwen-edit --model-config config/models.json
+
+# 只检查本地权重、调用参数和输入，不加载模型
+python scripts/bench.py generate \
+  --models my-qwen-edit --model-config config/models.json \
+  --ids 000_delete --output-root outputs/custom_smoke --preflight
+
+# 配置不变时，在同一目录执行真实生成
+python scripts/bench.py generate \
+  --models my-qwen-edit --model-config config/models.json \
+  --ids 000_delete --output-root outputs/custom_smoke
+
+python scripts/bench.py evaluate \
+  --runs-root outputs/custom_smoke --models all \
+  --config config/judge.json --device cuda
+
+python scripts/bench.py compare --runs-root outputs/custom_smoke --models all
+```
+
+配置扩展适用于已安装 Diffusers 中以 `prompt`、单张 `image`、`width`、`height`、`num_inference_steps` 和 `generator` 调用，并返回 `result.images` 的图片编辑管线。管线还需要暴露 `vae_scale_factor`，其尺寸倍数须兼容当前补边规则。配置不能重写原图、指令、尺寸、步数或随机数生成器。特殊预处理、自定义返回格式或 API 模型需要自己的推理脚本，并按“评测已有图片”提交结果。配置模板中的模型只是接入示例，不代表任意模型都能直接替换仓库 ID 运行。
+
+新增模型可以与其他模型放到同一个实验目录、使用同一组 case；每个模型保存在独立子目录。评分和汇总会自动读取记录的模型 ID，无需再次传入模型配置。全量运行时将 `--ids 000_delete` 换成 `--all`。
 
 ## 5. 评分与汇总
 

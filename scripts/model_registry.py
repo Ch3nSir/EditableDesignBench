@@ -9,6 +9,7 @@ from importlib.util import find_spec
 import json
 import math
 from pathlib import Path
+import re
 
 from settings import MODEL_ROOT
 GENERATION_PROTOCOL_VERSION='multi-image-edit-generation-v1'
@@ -90,6 +91,71 @@ MODEL_CONFIGS={
 }
 
 
+def load_model_config(path):
+    """Register extra Diffusers models without modifying built-in profiles.
+
+    The JSON file contains public generation settings, never API credentials.
+    Validate the entire file before updating the process-local registry.
+    """
+    if path is None:return
+    data=json.loads(Path(path).read_text())
+    if not isinstance(data,dict) or set(data)!={'models'} or not isinstance(data['models'],dict) or not data['models']:
+        raise ValueError('Model config requires a nonempty models object')
+    pending={}
+    allowed={'repo_id','local_dir','pipeline','pipeline_source','num_inference_steps',
+             'padding_multiple','call_kwargs','cpu_offload','required_components',
+             'is_distilled','checkpoint_sample_sigmas','conditioning_policy'}
+    reserved={'prompt','image','images','width','height','num_inference_steps','generator',
+              'mask','mask_image','target','target_image','reference_image','reference_images','control_image'}
+    for model_id,item in data['models'].items():
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',model_id) or model_id=='all':
+            raise ValueError('Invalid custom model ID')
+        if not isinstance(item,dict) or set(item)-allowed:
+            raise ValueError('Unsupported custom model fields: '+model_id)
+        config=deepcopy(item)
+        for name in ('repo_id','pipeline','pipeline_source','num_inference_steps','required_components'):
+            if name not in config:raise ValueError('Missing custom model field: '+name)
+        if not isinstance(config['repo_id'],str) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',config['repo_id']):
+            raise ValueError('Custom repo_id must be owner/repository')
+        if not isinstance(config['pipeline'],str) or not config['pipeline'].isidentifier():
+            raise ValueError('Custom pipeline must name an installed Diffusers class')
+        if not isinstance(config['pipeline_source'],str):raise ValueError('pipeline_source must be a relative Python source path')
+        source=Path(config['pipeline_source'])
+        if source.is_absolute() or '..' in source.parts or source.suffix!='.py':
+            raise ValueError('pipeline_source must be relative to diffusers/pipelines')
+        steps=config['num_inference_steps']
+        if type(steps) is not int or steps<1:raise ValueError('Custom steps must be a positive integer')
+        components=config['required_components']
+        if (not isinstance(components,list) or not components or
+                any(not isinstance(v,str) or not re.fullmatch(r'[A-Za-z0-9_]+',v) for v in components)
+                or len(set(components))!=len(components)):
+            raise ValueError('Custom required_components must list distinct component folder names')
+        config.setdefault('call_kwargs',{})
+        if not isinstance(config['call_kwargs'],dict) or reserved & set(config['call_kwargs']):
+            raise ValueError('Custom call_kwargs cannot override source, instruction, size, seed or steps')
+        # JSON's permissive NaN/Infinity values must never enter a run protocol.
+        try:json.dumps(config,allow_nan=False)
+        except ValueError:raise ValueError('Custom config must contain finite JSON values') from None
+        for key in ('cpu_offload','is_distilled','checkpoint_sample_sigmas'):
+            if key in config and type(config[key]) is not bool:raise ValueError(key+' must be boolean')
+        config.setdefault('cpu_offload',False)
+        if config.setdefault('padding_multiple',32)!=32:raise ValueError('Custom generation currently requires pad32 geometry')
+        local=config.get('local_dir',model_id)
+        if not isinstance(local,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',local):
+            raise ValueError('Custom local_dir must be a folder name under the model root')
+        config['local_dir']=str(MODEL_ROOT/local)
+        config['backend']='diffusion-pipeline'
+        config.setdefault('conditioning_policy','Single source image and original instruction; no target or masks.')
+        if model_id in MODEL_CONFIGS and MODEL_CONFIGS[model_id]!=config:
+            raise ValueError('Cannot replace an existing model profile: '+model_id)
+        occupied={**MODEL_CONFIGS,**pending}
+        if (any(other!=model_id and old['local_dir']==config['local_dir'] for other,old in occupied.items())
+                or any(dep['local_dir']==config['local_dir'] for old in occupied.values() for dep in old.get('dependencies',[]))):
+            raise ValueError('Custom models must use distinct checkpoint directories')
+        pending[model_id]=config
+    MODEL_CONFIGS.update(pending)
+
+
 def get_model_config(model_id):
     if model_id not in MODEL_CONFIGS:raise ValueError('Unsupported model ID: '+str(model_id))
     return deepcopy(MODEL_CONFIGS[model_id])
@@ -133,7 +199,7 @@ def validate_model_files(model_path,config):
             raise ValueError(f'Missing/invalid model component in model_index.json: {name}')
         if not (model_path/name).is_dir() or not any(p.is_file() for p in (model_path/name).iterdir()):
             raise ValueError(f'Model component files missing: {name}')
-        if name in {'transformer','vae','text_encoder'} or name.startswith('text_encoder_'):
+        if name in {'transformer','unet','vae','text_encoder','image_encoder'} or name.startswith('text_encoder_'):
             _validate_component_checkpoint(model_path/name)
     if 'is_distilled' in config and index.get('is_distilled') is not config['is_distilled']:
         raise ValueError('FLUX Klein checkpoint must explicitly declare is_distilled=true; base and distilled weights cannot be mixed')

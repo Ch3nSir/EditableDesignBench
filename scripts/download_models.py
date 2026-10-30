@@ -17,7 +17,7 @@ import tempfile
 import threading
 
 from settings import MODEL_ROOT
-from model_registry import MODEL_CONFIGS,get_model_config,validate_model_files
+from model_registry import MODEL_CONFIGS,get_model_config,validate_model_files,load_model_config
 try:
     from model_registry import DEFAULT_MODELS
 except ImportError:
@@ -218,13 +218,16 @@ def download_one(model_id,output_root,status_root,*,api,token,metadata_only=Fals
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--models',default='all',help='all or comma-separated registered model IDs')
+    p.add_argument('--model-config',type=Path,help='Additional Diffusers model profiles in JSON')
     p.add_argument('--output-root',type=Path,default=MODEL_ROOT)
     p.add_argument('--status-dir',type=Path,help='Progress directory; defaults to OUTPUT_ROOT/.model_downloads')
     p.add_argument('--metadata-only',action='store_true',help='Check login/access/revision and sizes; do not download weights')
     p.add_argument('--max-workers',type=int,default=4)
     a=p.parse_args(argv)
     if not 1<=a.max_workers<=16:p.error('--max-workers must be between 1 and 16')
-    try:models=selected_models(a.models)
+    try:
+        load_model_config(a.model_config)
+        models=selected_models(a.models)
     except ValueError as exc:p.error(str(exc))
     from huggingface_hub import HfApi,get_token,get_hf_file_metadata,hf_hub_url
     token=get_token();api=HfApi(token=token)

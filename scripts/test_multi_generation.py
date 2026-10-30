@@ -121,6 +121,35 @@ class MultiGenerationTests(unittest.TestCase):
         self.assertEqual(DEFAULT_MODELS,('flux3-klein','qwen-image21','qwen-image21-turbo'))
         self.assertEqual(get_model_config('qwen-image21-turbo')['num_inference_steps'],8)
 
+    def test_custom_profile_generates_bound_outputs_and_resumes_without_reloading(self):
+        config_file=self.root/'extra models.json'
+        profile={key:value for key,value in self.config.items() if key not in ('local_dir','backend')}
+        config_file.write_text(json.dumps({'models':{'custom-edit':profile}}))
+        with patch.dict(MODEL_CONFIGS):
+            self.assertEqual(self.preflight('--model-config',str(config_file),model_id='custom-edit'),0)
+            protocol=json.loads((self.output/'protocol.json').read_text())
+            plan=json.loads((self.output/'input_plan.json').read_text())
+            args=runner.parser().parse_args(self.cli('--model-config',str(config_file),model_id='custom-edit'))
+            args.cpu_offload=False
+            pipe=IdentityPipeline()
+            config=get_model_config('custom-edit')
+            with contextlib.redirect_stdout(io.StringIO()):
+                code=runner.run_generation(args,config,protocol,self.tasks,plan,{},self.torch,
+                    pipeline_factory=lambda *a:pipe)
+                records=runner.require_directory(self.output,protocol)
+                code2=runner.run_generation(args,config,protocol,self.tasks,plan,records,self.torch,
+                    pipeline_factory=lambda *a:self.fail('Valid custom outputs must be reused'))
+            self.assertEqual((code,code2),(0,0))
+            self.assertEqual(len(pipe.calls),2)
+            self.assertEqual(protocol['model_id'],'custom-edit')
+            self.assertEqual(protocol['model_config']['pipeline'],self.config['pipeline'])
+            for task in self.tasks:
+                pixels,_=runner.load_prediction(task,self.dataset,record=records[task['id']],
+                    manifest_path=self.output/'generation_manifest.json')
+                with Image.open(self.dataset/task['image']) as image:
+                    np.testing.assert_array_equal(pixels,np.asarray(image))
+                self.assertEqual(records[task['id']]['original_instruction'],task['instruction'])
+
     def test_preflight_pins_distinct_model_and_content_without_torch_import(self):
         real_import=builtins.__import__
         def reject_torch(name,*args,**kwargs):

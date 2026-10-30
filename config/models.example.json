@@ -1,0 +1,18 @@
+{
+  "models": {
+    "my-qwen-edit": {
+      "repo_id": "Qwen/Qwen-Image-Edit-2511",
+      "local_dir": "my-qwen-edit",
+      "pipeline": "QwenImageEditPlusPipeline",
+      "pipeline_source": "qwenimage/pipeline_qwenimage_edit_plus.py",
+      "num_inference_steps": 40,
+      "call_kwargs": {
+        "true_cfg_scale": 4.0,
+        "negative_prompt": " ",
+        "guidance_scale": 1.0
+      },
+      "cpu_offload": false,
+      "required_components": ["transformer", "vae", "scheduler", "tokenizer", "text_encoder", "processor"]
+    }
+  }
+}

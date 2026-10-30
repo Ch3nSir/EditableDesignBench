@@ -26,7 +26,7 @@ from evaluation_binding import canonical_hash
 from generation_provenance import collect_generation_content
 from model_registry import (
     MODEL_CONFIGS,GENERATION_PROTOCOL_VERSION,RESOLUTION_PROTOCOL,get_model_config,
-    inference_kwargs,load_pipeline,validate_model_files,validate_pipeline_signature,extract_generation_output,
+    inference_kwargs,load_pipeline,validate_model_files,validate_pipeline_signature,extract_generation_output,load_model_config,
 )
 from output_adapter import instruction_sha256,load_prediction,prepare_rgb_record,sha256_file
 
@@ -238,7 +238,8 @@ def run_generation(args,config,protocol,tasks,plan,records,torch,*,pipeline_fact
 
 def parser():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--model',choices=tuple(MODEL_CONFIGS),required=True)
+    p.add_argument('--model',required=True,help='Built-in or custom registered model ID')
+    p.add_argument('--model-config',type=Path,help='Additional Diffusers model profiles in JSON')
     p.add_argument('--dataset-root',type=Path,default=DATASET_ROOT)
     p.add_argument('--model-path',type=Path,help='Local checkpoint override; its content is still pinned')
     p.add_argument('--pup-path',type=Path,help='FLUX3-only local official prompt-upsampler directory override')
@@ -257,7 +258,7 @@ def parser():
 
 
 def main(argv=None):
-    args=parser().parse_args(argv);config=get_model_config(args.model)
+    args=parser().parse_args(argv);load_model_config(args.model_config);config=get_model_config(args.model)
     args.dataset_root=args.dataset_root.resolve();args.output_dir=args.output_dir.resolve()
     args.model_path=(args.model_path or Path(config['local_dir'])).resolve()
     if args.pup_path is not None:
