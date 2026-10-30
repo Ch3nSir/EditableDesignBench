@@ -273,17 +273,6 @@ python scripts/mllm_evaluate.py \
 
 单独测试子集时，两条命令都添加同一组 `--ids`，例如 `--ids 000_delete,000_insert`。直接提交的预测图需要与原图同尺寸；内置生成器的补边输出应通过 `generation_manifest.json` 评测，不能直接当作原生尺寸图片。
 
-## Slurm 提交（可选）
-
-在使用 Slurm 的集群上可添加 `--submit`，并填写本集群的分区和可选 GPU 特征：
-
-```bash
-python scripts/bench.py generate --models all --ids 000_delete --output-root outputs/slurm_smoke --submit --partition gpu --gpu-constraint h200
-python scripts/bench.py evaluate --runs-root outputs/slurm_smoke --models all --config config/judge.json --submit --partition gpu --gpu-constraint h200
-```
-
-不需要 GPU 特征约束时省略 `--gpu-constraint`。生成作业默认申请 1 张 GPU、8 核 CPU、256 GB 内存，可用 `--cpus-per-task`、`--memory`、`--time` 修改。像素评分默认 1 张 GPU、8 核、64 GB；评委和汇总作业只申请 CPU。评分会等待对应的生成作业结束。
-
 ## 方法与验证
 
 像素公式复用随仓库提供的 TextEditBench 评分源码：MSE/PSNR 使用官方配准流程，SSIM/LPIPS 使用未配准图片；每例独立计算后取逐例算术平均。评测与预览只处理内存中的图像数组，保留原始模型输出。
