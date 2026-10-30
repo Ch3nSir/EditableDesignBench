@@ -117,6 +117,42 @@ class BenchCLITests(unittest.TestCase):
         with patch.object(bench,'run_command',side_effect=self.local):self.assertEqual(self.invoke(*arguments),2)
         self.assertEqual((self.experiment/'experiment.json').read_bytes(),before)
 
+    def test_native_predictions_are_scored_in_one_command_with_the_same_subset(self):
+        predictions=self.root/'predictions'/'MyModel';predictions.mkdir(parents=True)
+        destination=self.root/'scores'
+        with patch.object(bench,'judge_ready'),patch.object(bench,'run_command',side_effect=self.local):
+            self.assertEqual(self.invoke('evaluate','--predictions',str(predictions),
+                '--dataset-root',str(self.dataset),'--ids','case000,case002','--output-dir',str(destination)),0)
+        self.assertEqual([Path(c[1]).name for c in self.calls],['evaluate.py','mllm_evaluate.py'])
+        for command in self.calls:
+            self.assertEqual(command[command.index('--ids')+1],'case000,case002')
+            self.assertEqual(command[command.index('--predictions')+1],str(predictions))
+            self.assertNotIn('--config',command)
+        self.assertIn(str(destination/'pixel_scores.json'),self.calls[0])
+        self.assertIn(str(destination/'mllm_scores.json'),self.calls[1])
+
+    def test_native_prediction_failure_still_reports_both_tracks_and_returns_failure(self):
+        predictions=self.root/'predictions';predictions.mkdir()
+        def run(command):
+            self.local(command)
+            return 1 if Path(command[1]).name=='evaluate.py' else 0
+        with patch.object(bench,'judge_ready'),patch.object(bench,'run_command',side_effect=run):
+            code=self.invoke('evaluate','--predictions',str(predictions),'--dataset-root',str(self.dataset),
+                '--output-dir',str(self.root/'scores'))
+        self.assertEqual(code,1);self.assertEqual(len(self.calls),2)
+
+    def test_native_pixel_only_needs_no_credentials_and_invalid_ids_start_no_processes(self):
+        predictions=self.root/'predictions';predictions.mkdir()
+        arguments=['evaluate','--predictions',str(predictions),'--dataset-root',str(self.dataset),
+                   '--output-dir',str(self.root/'scores'),'--pixel-only']
+        with patch.object(bench,'judge_ready',side_effect=AssertionError('Pixel-only asked for an API key')),\
+                patch.object(bench,'run_command',side_effect=self.local):
+            self.assertEqual(self.invoke(*arguments,'--ids','not-a-task'),2)
+            self.assertEqual(self.calls,[])
+            self.assertEqual(self.invoke(*arguments),0)
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(len(self.calls[0][self.calls[0].index('--ids')+1].split(',')),400)
+
     def test_missing_formal_credentials_fail_before_any_process_or_jobs(self):
         with patch.dict(os.environ,{},clear=True),patch.object(bench.subprocess,'run',side_effect=AssertionError('A job/API process started')):
             code=self.invoke('evaluate','--runs-root',str(self.experiment),'--submit')

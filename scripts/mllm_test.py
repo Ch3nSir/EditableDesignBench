@@ -30,6 +30,25 @@ class AdapterTests(unittest.TestCase):
 
     def tearDown(self):self.temp.cleanup()
 
+    def test_luna_environment_only_matches_explicit_config_and_reuses_paid_scores(self):
+        args=self.args();args.config=None
+        environment={'OPENAI_API_KEY':'offline-fixture','OPENAI_API_URL':'https://judge.example/v1',
+                     'OPENAI_MODEL':'gpt-6-luna'}
+        config={'request_profile':'reasoning_chat','reasoning_effort':'low','max_completion_tokens':4096,'store':False}
+        self.config.write_text(json.dumps(config))
+        with patch.dict(os.environ,environment,clear=True):
+            first,code=m.evaluate(args,transport=self.success)
+            self.assertEqual(code,0);self.assertEqual(first['api_calls_made'],4)
+            self.assertEqual(first['protocol']['request_parameters'],m.request_parameters(config))
+            args.config=self.config
+            resumed,code=m.evaluate(args,transport=lambda *a:self.fail('Equivalent explicit config repeated API calls'))
+            self.assertEqual(code,0);self.assertEqual(resumed['api_calls_made'],0)
+
+    def test_explicit_legacy_profile_overrides_luna_automatic_parameters(self):
+        args=self.args();self.config.write_text(json.dumps({'model':'gpt-6-luna','request_profile':'texteditbench'}))
+        with patch.dict(os.environ,{},clear=True):
+            self.assertEqual(m.load_credentials(args)['request_parameters'],{'temperature':0.0,'max_tokens':500})
+
     def test_reasoning_parameters_and_usage_are_preserved(self):
         config=json.loads(self.config.read_text())
         config.update(request_profile='reasoning_chat',max_completion_tokens=4096,

@@ -216,6 +216,11 @@ def load_credentials(args) -> dict:
     endpoint=base if base.endswith('/chat/completions') else base+'/chat/completions'
     model=args.model or config.get('model') or os.getenv('MLLM_MODEL') or os.getenv('OPENAI_MODEL')
     if model is not None and (not isinstance(model,str) or not model.strip()):raise JudgeError('Invalid judge model')
+    # The documented judge works with environment variables alone. Explicit
+    # profiles retain precedence, including the original TextEditBench profile.
+    if model=='gpt-6-luna' and 'request_profile' not in config:
+        config={**config,'request_profile':'reasoning_chat'}
+        config.setdefault('store',False)
     return {'api_key':key,'endpoint':endpoint,'model':model,
             'timeout':float(config.get('timeout',args.timeout)),
             'max_retries':int(config.get('max_retries',args.max_retries)),

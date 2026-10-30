@@ -327,8 +327,39 @@ def _stage_command(args,root,dataset,model,stage):
     return command
 
 
+def evaluate_predictions(args):
+    """Score native images from any model through the same two evaluators."""
+    if args.submit or args.stage!='all':raise ValueError('Use local complete evaluation for --predictions')
+    if args.models!='all':raise ValueError('--predictions evaluates one model folder per command; omit --models')
+    predictions=_safe_path(args.predictions)
+    if not predictions.is_dir():raise ValueError('Predictions directory does not exist')
+    dataset=_safe_path(args.dataset_root or DATASET_ROOT)
+    tasks=select_tasks(dataset,args.ids,args.ids is None)
+    ids=','.join(task['id'] for task in tasks)
+    output=_safe_path(args.output_dir or ROOT/'results'/predictions.name)
+    if output==dataset or output.is_relative_to(dataset):raise ValueError('Results must be outside the dataset directory')
+    pixel=[args.python,str(SCRIPTS/'evaluate.py'),'--dataset-root',str(dataset),
+           '--predictions',str(predictions),'--ids',ids,'--device',args.device,
+           '--cpu-threads','8' if args.device=='cuda' else '2','--output',str(output/'pixel_scores.json')]
+    judge=[args.python,str(SCRIPTS/'mllm_evaluate.py'),'--dataset',str(dataset),
+           '--predictions',str(predictions),'--ids',ids,
+           '--output',str(output/('mllm_pending.json' if args.dry_run else 'mllm_scores.json'))]
+    if args.config is not None:judge.extend(['--config',str(args.config)])
+    judge.append('--dry-run' if args.dry_run else '--require-scoring')
+    with experiment_lock(output):
+        stages={'pixel':run_command(pixel)}
+        if not args.pixel_only:stages['judge']=run_command(judge)
+    failed=any(stages.values())
+    print(json.dumps({'status':'failed' if failed else 'validated' if args.dry_run else 'complete','output_dir':str(output),
+                      'mode':'pixel-only' if args.pixel_only else 'dry-run' if args.dry_run else 'formal',
+                      'cases':len(tasks),'stages':stages}),flush=True)
+    return 1 if failed else 0
+
+
 def evaluate(args):
     if not args.pixel_only and not args.dry_run and args.stage!='pixel':judge_ready(args.config)
+    if args.predictions is not None:return evaluate_predictions(args)
+    if args.ids is not None:raise ValueError('--ids is for --predictions; generated runs already record their case selection')
     root,dataset,selected,runs,expected=evaluation_context(args)
     if args.submit:
         if args.stage!='all':raise ValueError('Submit the complete evaluation stages together')
@@ -385,7 +416,11 @@ def parser():
     generate_p.add_argument('--partition',default='gpu');generate_p.add_argument('--gpu-constraint')
     generate_p.add_argument('--cpus-per-task',type=int,default=8);generate_p.add_argument('--memory',default='256G')
     eval_p=sub.add_parser('evaluate',help='Compute common pixels, judge dimensions, previews and formal reports')
-    eval_p.add_argument('--runs-root',required=True,type=Path);eval_p.add_argument('--dataset-root',type=Path)
+    inputs=eval_p.add_mutually_exclusive_group(required=True)
+    inputs.add_argument('--runs-root',type=Path,help='Experiment directory produced by generate')
+    inputs.add_argument('--predictions',type=Path,help='Native RGB <case-id>.png images from any model')
+    eval_p.add_argument('--ids',help='Comma-separated subset for --predictions; default all dataset cases')
+    eval_p.add_argument('--dataset-root',type=Path)
     eval_p.add_argument('--models',default='all');eval_p.add_argument('--config',type=Path)
     modes=eval_p.add_mutually_exclusive_group();modes.add_argument('--pixel-only',action='store_true');modes.add_argument('--dry-run',action='store_true')
     eval_p.add_argument('--device',choices=('cpu','cuda'),default='cpu');eval_p.add_argument('--submit',action='store_true')
