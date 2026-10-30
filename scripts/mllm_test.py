@@ -34,20 +34,43 @@ class AdapterTests(unittest.TestCase):
         args=self.args();args.config=None
         environment={'OPENAI_API_KEY':'offline-fixture','OPENAI_API_URL':'https://judge.example/v1',
                      'OPENAI_MODEL':'gpt-6-luna'}
-        config={'request_profile':'reasoning_chat','reasoning_effort':'low','max_completion_tokens':4096,'store':False}
-        self.config.write_text(json.dumps(config))
+        config=json.loads((m.ROOT/'config/judge.example.json').read_text())
+        self.config.write_text(json.dumps(config));payloads=[]
+        def capture(*values):
+            payloads.append(values[2])
+            return self.success(*values)
         with patch.dict(os.environ,environment,clear=True):
-            first,code=m.evaluate(args,transport=self.success)
+            first,code=m.evaluate(args,transport=capture)
             self.assertEqual(code,0);self.assertEqual(first['api_calls_made'],4)
-            self.assertEqual(first['protocol']['request_parameters'],m.request_parameters(config))
+            self.assertEqual(first['protocol']['temperature'],0)
+            self.assertEqual(first['protocol']['max_tokens_per_criterion'],500)
+            for payload in payloads:
+                self.assertEqual(payload['temperature'],0)
+                self.assertEqual(payload['max_tokens'],500)
+                self.assertNotIn('max_completion_tokens',payload)
+                self.assertNotIn('reasoning_effort',payload)
+            self.assertEqual(m.request_parameters(config),{'temperature':0.0,'max_tokens':500})
             args.config=self.config
             resumed,code=m.evaluate(args,transport=lambda *a:self.fail('Equivalent explicit config repeated API calls'))
             self.assertEqual(code,0);self.assertEqual(resumed['api_calls_made'],0)
 
-    def test_explicit_legacy_profile_overrides_luna_automatic_parameters(self):
-        args=self.args();self.config.write_text(json.dumps({'model':'gpt-6-luna','request_profile':'texteditbench'}))
-        with patch.dict(os.environ,{},clear=True):
-            self.assertEqual(m.load_credentials(args)['request_parameters'],{'temperature':0.0,'max_tokens':500})
+    def test_model_name_does_not_override_official_request_parameters(self):
+        args=self.args()
+        for model in ('gpt-6-luna','gpt-4o','mock-judge'):
+            self.config.write_text(json.dumps({'model':model}))
+            with self.subTest(model=model),patch.dict(os.environ,{},clear=True):
+                self.assertEqual(m.load_credentials(args)['request_parameters'],{'temperature':0.0,'max_tokens':500})
+
+    def test_official_parameters_do_not_reuse_reasoning_profile_scores(self):
+        config=json.loads(self.config.read_text());config['request_profile']='reasoning_chat'
+        self.config.write_text(json.dumps(config))
+        with patch.dict(os.environ,{'MOCK_JUDGE_KEY':'offline-fixture'},clear=True):
+            first,code=m.evaluate(self.args(),transport=self.success)
+            self.assertEqual(code,0)
+            config['request_profile']='texteditbench';self.config.write_text(json.dumps(config))
+            second,code=m.evaluate(self.args(),transport=self.success)
+            self.assertEqual(code,0);self.assertEqual(second['api_calls_made'],4)
+            self.assertNotEqual(first['results'][0]['fingerprint'],second['results'][0]['fingerprint'])
 
     def test_reasoning_parameters_and_usage_are_preserved(self):
         config=json.loads(self.config.read_text())

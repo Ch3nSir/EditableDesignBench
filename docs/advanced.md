@@ -41,11 +41,11 @@ python scripts/bench.py compare --runs-root outputs/custom_smoke --models all
 
 ## API 与请求参数
 
-README 中的环境变量足以使用 GPT-6-Luna，脚本自动选择 `reasoning_chat`：`reasoning_effort=low`、`max_completion_tokens=4096`、`store=false`，不发送 `temperature`。四个维度分别独立请求。
+默认沿用 TextEditBench 的 `temperature=0`、`max_tokens=500`，GPT-6-Luna 也使用这组参数。四个维度分别独立请求。
 
-如需修改请求参数，可以创建自己的 JSON，通过 `evaluate --config path/to/judge.json` 传入。字段示例见 [judge.example.json](../config/judge.example.json)。显式请求配置优先于自动配置。
+如需配置 API 地址、凭据来源、超时或重试次数，可以创建自己的 JSON，通过 `evaluate --config path/to/judge.json` 传入。字段示例见 [judge.example.json](../config/judge.example.json)，其中 `request_profile=texteditbench` 固定使用上述参数。
 
-其他评委默认沿用 TextEditBench 的 `temperature=0`、`max_tokens=500`；推理模型需在 JSON 中显式设置 `request_profile=reasoning_chat`。比较模型时应使用同一个评委和请求参数。
+`reasoning_chat` 保留为显式可选的兼容配置，只有在 JSON 中指定时才启用。比较模型时应使用同一个评委和请求参数。
 
 也可以将 `OPENAI_API_KEY`、`OPENAI_API_URL`、`OPENAI_MODEL` 写入仓库根目录的 `.env`，每行 `变量名=值`。脚本自动读取，已导出的环境变量优先。不要提交自己的密钥。
 

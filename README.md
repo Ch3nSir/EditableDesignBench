@@ -34,7 +34,7 @@ export OPENAI_API_URL="https://api.openai.com/v1"
 export OPENAI_MODEL="gpt-6-luna"
 ```
 
-使用代理时修改 `OPENAI_API_URL`。无需准备 JSON 配置文件；只计算像素指标时可跳过此步。
+使用代理时修改 `OPENAI_API_URL`。评委请求沿用 TextEditBench 的 `temperature=0`、`max_tokens=500`。无需准备 JSON 配置文件；只计算像素指标时可跳过此步。
 
 ## 4. 生成图片
 
