@@ -1,0 +1,28 @@
+{
+  "upstream": "https://github.com/CSU-JPG/TextEditBench",
+  "upstream_commit": "febaaec46eddcc3723c1336b1e627e79e52efa05",
+  "copy_policy": "Byte-for-byte; not imported or executed to collect prompts.",
+  "files": {
+    "evaluation/mse_psnr.py": {
+      "bytes": 12411,
+      "sha256": "40b565db7841cd6a29948e76d27f5d7e0ddda08b828e1c552ef106c8e1765d02"
+    },
+    "evaluation/lipis_ssim.py": {
+      "bytes": 11847,
+      "sha256": "cf11ba1cfc3a8e96c81c236e83320d03b8e2cefe0a9dbdb737d297e781118ed9"
+    },
+    "evaluation/gpt_eval.py": {
+      "bytes": 27166,
+      "sha256": "67ba574aef1710e070039c695df9807cfdc0c4705230f26546ece385585209f3"
+    },
+    "evaluation/gpt_eval_no_refer.py": {
+      "bytes": 28306,
+      "sha256": "47be9f06a31d1cbc840ace5e6c1ae83ed2691e897563e80ec1350e9d8abb1f8b"
+    }
+  },
+  "secret_scan": {
+    "hardcoded_token_patterns": false,
+    "possible_secret_assignment_literals": false
+  },
+  "upstream_license_file_present": false
+}

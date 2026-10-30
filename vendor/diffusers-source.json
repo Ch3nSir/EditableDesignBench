@@ -1,0 +1,8 @@
+{
+  "upstream": "https://github.com/huggingface/diffusers",
+  "commit": "d8c1b13c756df0059bcdb6e477a1eafcd502098d",
+  "distribution_version": "0.42.0.dev0",
+  "wheel": "diffusers-0.42.0.dev0-1d8c1b13-py3-none-any.whl",
+  "policy": "Unmodified upstream Python sources; vendored to preserve the Flux3 and Qwen21 Turbo APIs used by the benchmark.",
+  "license": "Apache-2.0"
+}

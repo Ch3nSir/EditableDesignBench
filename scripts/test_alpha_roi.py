@@ -1,0 +1,159 @@
+"""Native-ROI alpha eligibility and immutable RGB output provenance contracts."""
+import copy
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+import numpy as np
+from PIL import Image
+
+from output_adapter import (
+    ADAPTER_VERSION, instruction_sha256, load_prediction, prepare_rgb_record,
+    sha256_file,
+)
+
+
+class NativeAlphaTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory()
+        self.root=Path(self.temp.name)
+        self.folder=self.root/'cases/a';self.folder.mkdir(parents=True)
+        self.rgb=np.arange(32*32*3,dtype=np.uint8).reshape(32,32,3)
+        self.source=self.folder/'source.png';Image.fromarray(self.rgb).save(self.source)
+        self.task={'id':'a','image':'cases/a/source.png','instruction':"Delete 'a'."}
+        self.manifest=self.root/'generation_manifest.json'
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def fixture(self,*,padding=True,padding_alpha=255,native_alpha=255):
+        side=64 if padding else 32
+        pixels=np.pad(self.rgb,((0,side-32),(0,side-32),(0,0)),mode='edge')
+        alpha=np.full((side,side),padding_alpha,np.uint8)
+        alpha[:32,:32]=native_alpha
+        raw=self.root/'raw.png';Image.fromarray(np.dstack([pixels,alpha])).save(raw)
+        meta={'id':'a','source_size':[32,32],'canvas_size':[side,side],
+              'evaluation_roi':[0,0,32,32],
+              'padding':{'left':0,'top':0,'right':side-32,'bottom':side-32,
+                         'mode':'edge' if padding else 'none'},
+              'source_sha256':sha256_file(self.source),
+              'instruction_sha256':instruction_sha256(self.task),
+              'protocol_sha256':'a'*64}
+        return raw,meta
+
+    def load(self,record):
+        return load_prediction(self.task,self.root,record=record,manifest_path=self.manifest)
+
+    def test_transparent_padding_is_accepted_and_only_native_roi_is_returned(self):
+        raw,meta=self.fixture(padding_alpha=0)
+        before=raw.read_bytes();export=self.root/'rgb.png'
+        record=prepare_rgb_record(raw,export,meta)
+        self.assertEqual(record['status'],'complete')
+        self.assertEqual(record['adapter_version'],ADAPTER_VERSION)
+        self.assertEqual(record['alpha']['scope'],'native_evaluation_roi')
+        self.assertEqual(record['alpha']['minimum'],255)
+        self.assertEqual(record['alpha_canvas']['minimum'],0)
+        self.assertEqual(record['alpha_canvas']['fraction_below_128'],.75)
+        output,provenance=self.load(record)
+        self.assertTrue(np.array_equal(output,self.rgb))
+        self.assertEqual(raw.read_bytes(),before)
+        with Image.open(raw) as original,Image.open(export) as rgb:
+            self.assertEqual(rgb.size,(64,64))
+            self.assertTrue(np.array_equal(np.asarray(rgb),np.asarray(original)[:,:,:3]))
+        self.assertEqual(provenance['source_sha256'],sha256_file(self.source))
+        self.assertEqual(provenance['instruction_sha256'],instruction_sha256(self.task))
+        self.assertEqual(provenance['raw_sha256'],sha256_file(raw))
+        self.assertEqual(provenance['rgb_sha256'],sha256_file(export))
+        self.assertEqual(provenance['generation_protocol_sha256'],'a'*64)
+
+    def test_native_transparency_is_rejected_even_when_padding_is_opaque(self):
+        raw,meta=self.fixture(native_alpha=0)
+        before=raw.read_bytes();export=self.root/'rgb.png'
+        record=prepare_rgb_record(raw,export,meta)
+        self.assertEqual(record['status'],'rejected_alpha')
+        self.assertIn('native evaluation ROI',record['error'])
+        self.assertFalse(export.exists());self.assertEqual(raw.read_bytes(),before)
+
+    def test_native_fraction_threshold_uses_native_denominator(self):
+        for count,expected in [(1,'complete'),(2,'rejected_alpha')]:
+            raw,meta=self.fixture(padding_alpha=0)
+            pixels=np.asarray(Image.open(raw)).copy()
+            pixels[0,:count,3]=249
+            Image.fromarray(pixels).save(raw)
+            record=prepare_rgb_record(raw,self.root/f'export-{count}.png',meta)
+            self.assertEqual(record['status'],expected)
+            self.assertEqual(record['alpha']['fraction_below_250'],count/1024)
+
+    def test_no_padding_uses_same_policy(self):
+        for alpha,status in [(255,'complete'),(127,'rejected_alpha')]:
+            raw,meta=self.fixture(padding=False,native_alpha=alpha)
+            record=prepare_rgb_record(raw,self.root/f'export-{alpha}.png',meta)
+            self.assertEqual(record['status'],status)
+            roi=dict(record['alpha']);roi.pop('scope')
+            self.assertEqual(roi,record['alpha_canvas'])
+
+    def test_invalid_padding_cannot_hide_native_transparency(self):
+        raw,meta=self.fixture(padding_alpha=0)
+        meta['evaluation_roi']=[0,0,31,32]
+        with self.assertRaisesRegex(ValueError,'Only recorded native'):
+            prepare_rgb_record(raw,self.root/'rgb.png',meta)
+        raw,meta=self.fixture(padding_alpha=0)
+        meta['padding']['right']=31
+        with self.assertRaisesRegex(ValueError,'Inconsistent padding'):
+            prepare_rgb_record(raw,self.root/'rgb.png',meta)
+
+    def test_load_rechecks_native_alpha_instead_of_trusting_record_statistics(self):
+        raw,meta=self.fixture(padding_alpha=0)
+        record=prepare_rgb_record(raw,self.root/'rgb.png',meta)
+        pixels=np.asarray(Image.open(raw)).copy();pixels[0,0,3]=0
+        Image.fromarray(pixels).save(raw)
+        record['raw_sha256']=sha256_file(raw)
+        record['alpha']['minimum']=255
+        with self.assertRaisesRegex(ValueError,'native evaluation ROI'):
+            self.load(record)
+
+    def test_legacy_v1_record_is_read_without_rewriting_or_claiming_new_generation(self):
+        raw,meta=self.fixture()
+        record=prepare_rgb_record(raw,self.root/'rgb.png',meta)
+        record['adapter_version']='raw-rgb-roi-v1'
+        record['alpha']=dict(record.pop('alpha_canvas'))
+        record['alpha_policy']='Legacy full-canvas alpha policy'
+        self.manifest.write_text(json.dumps({'schema_version':1,'records':[record]}))
+        before_manifest=self.manifest.read_bytes();before_record=copy.deepcopy(record)
+        before_raw=raw.read_bytes();before_rgb=Path(record['rgb_output']).read_bytes()
+        _,provenance=self.load(record)
+        self.assertEqual(provenance['adapter_version'],'raw-rgb-roi-v1')
+        self.assertEqual(provenance['validation_adapter_version'],ADAPTER_VERSION)
+        self.assertEqual(record,before_record)
+        self.assertEqual(self.manifest.read_bytes(),before_manifest)
+        self.assertEqual(raw.read_bytes(),before_raw)
+        self.assertEqual(Path(record['rgb_output']).read_bytes(),before_rgb)
+
+    def test_native_rgb_has_uniform_hash_geometry_and_input_provenance(self):
+        prediction=self.root/'a.png';Image.fromarray(self.rgb).save(prediction)
+        result,provenance=load_prediction(self.task,self.root,predictions_dir=self.root)
+        self.assertTrue(np.array_equal(result,self.rgb))
+        self.assertEqual(provenance['raw_sha256'],provenance['rgb_sha256'])
+        self.assertEqual(provenance['raw_output'],provenance['rgb_output'])
+        self.assertEqual(provenance['source_sha256'],sha256_file(self.source))
+        self.assertEqual(provenance['instruction_sha256'],instruction_sha256(self.task))
+        self.assertEqual(provenance['source_size'],[32,32])
+        self.assertEqual(provenance['canvas_size'],[32,32])
+        self.assertEqual(provenance['padding']['mode'],'none')
+        self.assertIsNone(provenance['generation_protocol_sha256'])
+
+    def test_model_input_hash_is_checked_when_available(self):
+        raw,meta=self.fixture()
+        model_input=self.root/'model_input.png';Image.fromarray(self.rgb).save(model_input)
+        meta.update(model_input=str(model_input),model_input_sha256=sha256_file(model_input))
+        record=prepare_rgb_record(raw,self.root/'rgb.png',meta)
+        _,provenance=self.load(record)
+        self.assertEqual(provenance['model_input_sha256'],sha256_file(model_input))
+        self.assertEqual(provenance['model_input'],str(model_input.resolve()))
+        Image.new('RGB',(32,32),'red').save(model_input)
+        with self.assertRaisesRegex(ValueError,'Model input hash mismatch'):
+            self.load(record)
+
+
+if __name__=='__main__':unittest.main()

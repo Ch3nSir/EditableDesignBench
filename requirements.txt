@@ -1,0 +1,18 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+./vendor/diffusers-0.42.0.dev0-1d8c1b13-py3-none-any.whl
+transformers==5.20.2
+accelerate==1.15.0
+huggingface-hub==2.3.0
+safetensors==0.8.0
+numpy==2.5.2
+Pillow==12.3.0
+opencv-python-headless==4.11.0.86
+torchmetrics==1.9.0
+tabulate==0.10.0
+sentencepiece==0.2.2
+protobuf==7.36.2
+einops==0.8.1
+requests==2.34.2
+python-dotenv==1.2.1

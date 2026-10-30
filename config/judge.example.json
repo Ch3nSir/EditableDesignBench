@@ -1,0 +1,9 @@
+{
+  "api_key_env": "OPENAI_API_KEY",
+  "request_profile": "reasoning_chat",
+  "reasoning_effort": "low",
+  "max_completion_tokens": 4096,
+  "store": false,
+  "timeout": 120,
+  "max_retries": 2
+}

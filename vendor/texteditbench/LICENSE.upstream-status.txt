@@ -1,0 +1,5 @@
+No standalone upstream LICENSE/COPYING/NOTICE file was present in the inspected TextEditBench checkout.
+Original per-file headers and license declarations are preserved without modification in evaluation/*.py.
+This status record is not an invented license or a replacement for upstream terms.
+Upstream: https://github.com/CSU-JPG/TextEditBench
+Upstream revision: febaaec46eddcc3723c1336b1e627e79e52efa05

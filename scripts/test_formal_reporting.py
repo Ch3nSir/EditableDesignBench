@@ -1,0 +1,213 @@
+"""Formal, multi-model reporting with real files and an offline judge stub."""
+import concurrent.futures
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import numpy as np
+from PIL import Image
+
+import compare_models
+import evaluate
+from evaluation_binding import canonical_hash
+import formal_report
+import mllm_evaluate as judge
+from output_adapter import instruction_sha256,prepare_rgb_record,sha256_file
+
+
+class FormalReportingTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary=tempfile.TemporaryDirectory();self.root=Path(self.temporary.name)
+        self.dataset=self.root/'dataset';self.runs=self.root/'runs';self.runs.mkdir()
+        self.tasks=[]
+        pixels=np.arange(64*64*3,dtype=np.uint8).reshape(64,64,3)
+        for cid in ('a','b'):
+            folder=self.dataset/'cases'/cid;folder.mkdir(parents=True)
+            Image.fromarray(pixels).save(folder/'source.png');Image.fromarray(pixels).save(folder/'target.png')
+            mask=np.zeros((64,64),np.uint8);mask[5:15,6:20]=255
+            for name in ('mask.png','target_region_mask.png'):Image.fromarray(mask).save(folder/name)
+            self.tasks.append({'id':cid,'source_id':cid,'image':f'cases/{cid}/source.png','operation':'delete',
+                               'domain':'poster','instruction':"Delete 'a'.",'output_filename':cid+'.png'})
+        (self.dataset/'tasks.jsonl').write_text(''.join(json.dumps(t)+'\n' for t in self.tasks))
+        (self.dataset/'summary.json').write_text('{"version":"fixture"}\n')
+        self.summary_before=(self.dataset/'summary.json').read_bytes()
+        self.calls=0
+
+    def tearDown(self):
+        self.assertEqual((self.dataset/'summary.json').read_bytes(),self.summary_before)
+        self.temporary.cleanup()
+
+    @staticmethod
+    def pixel_scores(*args,**kwargs):
+        values={'mse':10.,'psnr':38.1308,'ssim':.99,'lpips':.01}
+        return {**values,'metric_status':dict.fromkeys(values,'ok'),'metric_errors':{}}
+
+    def transport(self,endpoint,key,payload,timeout):
+        self.calls+=1
+        prompt=payload['messages'][0]['content']
+        dimension=next(d for d in ('IF','TA','VC','LP','SE') if '{"'+d+'": X' in prompt)
+        return {'choices':[{'message':{'content':json.dumps({dimension:4,'rationale':'Offline judged against image and prompt.'})},'finish_reason':'stop'}]}
+
+    def create_run(self,model='model-a',ids=('a',),*,scored=True,judge_model='mock-judge',steps=4,fail_dimension=None):
+        run=self.runs/model;run.mkdir()
+        content={'version':'SYNTHETIC_TEST_CONTENT_NOT_MODEL'};content['sha256']=canonical_hash(content)
+        protocol={'case_ids':list(ids),'model_id':model,'run_id':'fixture-run','steps':steps,
+            'generation_protocol_version':'multi-image-edit-generation-v1','content_provenance':content,
+            'resolution_protocol':'native-pad32-v1'}
+        protocol['protocol_sha256']=canonical_hash(protocol)
+        (run/'protocol.json').write_text(json.dumps(protocol))
+        records=[]
+        for task in self.tasks:
+            if task['id'] not in ids:continue
+            folder=run/task['id'];folder.mkdir();raw=folder/'raw.png';rgb=folder/'prediction.png'
+            with Image.open(self.dataset/task['image']) as source:Image.fromarray(np.dstack([np.asarray(source),np.full((64,64),255,np.uint8)])).save(raw)
+            metadata={'id':task['id'],'model_id':model,'run_id':'fixture-run','source_size':[64,64],
+                'canvas_size':[64,64],'evaluation_roi':[0,0,64,64],
+                'padding':{'left':0,'top':0,'right':0,'bottom':0,'mode':'none'},
+                'source_sha256':sha256_file(self.dataset/task['image']),'instruction_sha256':instruction_sha256(task),
+                'protocol_sha256':protocol['protocol_sha256'],'content_provenance_sha256':content['sha256']}
+            records.append(prepare_rgb_record(raw,rgb,metadata))
+        manifest=run/'generation_manifest.json'
+        manifest.write_text(json.dumps({'schema_version':1,'status':'complete','expected_ids':list(ids),
+            'model_id':model,'run_id':'fixture-run','generation_protocol_version':protocol['generation_protocol_version'],
+            'content_provenance_sha256':content['sha256'],'protocol_sha256':protocol['protocol_sha256'],'records':records}))
+        with contextlib.redirect_stdout(io.StringIO()),patch.object(evaluate,'score_case',side_effect=self.pixel_scores),patch.object(evaluate,'_configure_runtime',return_value=[]):
+            self.assertEqual(evaluate.main(['--dataset-root',str(self.dataset),'--generation-manifest',str(manifest),
+                '--ids',','.join(ids),'--output',str(run/'pixel_scores.json')]),0)
+        config=run/'judge_config.json';config.write_text(json.dumps({'model':judge_model,'api_key_env':'OFFLINE_JUDGE_KEY',
+            'base_url':'https://judge.invalid/v1','max_retries':0}))
+        args=['--dataset',str(self.dataset),'--generation-manifest',str(manifest),'--ids',','.join(ids),
+              '--config',str(config),'--output',str(run/('mllm_scores.json' if scored else 'mllm_pending.json'))]
+        if not scored:args.append('--dry-run')
+        def transport(*values):
+            response=self.transport(*values)
+            content=response['choices'][0]['message']['content']
+            if fail_dimension and fail_dimension in json.loads(content):
+                response['choices'][0]['message']['content']='invalid judge JSON'
+            return response
+        with patch.dict(os.environ,{'OFFLINE_JUDGE_KEY':'OFFLINE_NOT_REAL'},clear=True):
+            report,code=judge.evaluate(judge.parser().parse_args(args),transport=transport,sleeper=lambda _:None)
+        self.assertEqual(code,1 if scored and fail_dimension else 0)
+        return run
+
+    def test_real_formal_scores_are_accepted_without_an_api_call(self):
+        run=self.create_run();count=self.calls
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,0);self.assertTrue(report['full_evaluation_complete'])
+        self.assertEqual(report['metrics']['IF'],4);self.assertEqual(self.calls,count)
+        self.assertEqual(report['model_id'],'model-a');self.assertEqual(report['expected_cases'],1)
+
+    def test_dryrun_and_pixel_only_cannot_claim_full_semantic_completion(self):
+        run=self.create_run(scored=False)
+        dry,code=formal_report.evaluate_run(run,self.dataset,mode='dry-run')
+        self.assertEqual(code,0);self.assertTrue(dry['requested_mode_valid']);self.assertFalse(dry['complete'])
+        self.assertFalse(dry['semantic_complete']);self.assertIsNone(dry['metrics']['IF'])
+        pixel,code=formal_report.evaluate_run(run,self.dataset,mode='pixel-only')
+        self.assertEqual(code,0);self.assertTrue(pixel['complete']);self.assertFalse(pixel['full_evaluation_complete'])
+        self.assertEqual(self.calls,0)
+
+    def test_pending_judge_cannot_pass_formal_completion(self):
+        run=self.create_run(scored=False)
+        (run/'mllm_scores.json').write_bytes((run/'mllm_pending.json').read_bytes())
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,1);self.assertFalse(report['complete']);self.assertIsNone(report['metrics']['IF'])
+        self.assertEqual(report['semantic_coverage']['IF']['expected'],1)
+
+    def test_all_requires_the_entire_dataset_not_only_selected_case(self):
+        run=self.create_run()
+        with self.assertRaisesRegex(ValueError,'case set differs'):
+            formal_report.evaluate_run(run,self.dataset,expected_ids='all')
+
+    def test_tampered_judge_summary_is_rejected(self):
+        run=self.create_run();path=run/'mllm_scores.json';saved=json.loads(path.read_text())
+        saved['summary']['criteria']['IF']['mean']=5;path.write_text(json.dumps(saved))
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,1);self.assertFalse(report['semantic_complete'])
+        self.assertTrue(any('summary differs' in error for error in report['validation_errors']))
+
+    def test_changed_mask_invalidates_formal_pixel_track(self):
+        run=self.create_run();Image.new('L',(64,64),0).save(self.dataset/'cases/a/mask.png')
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,1);self.assertFalse(report['pixel_complete']);self.assertIsNone(report['metrics']['mse'])
+
+    def test_model_specific_sampling_parameters_do_not_prevent_comparison(self):
+        self.create_run('model-a',steps=4);self.create_run('model-b',steps=40)
+        result,code=compare_models.compare_runs(self.runs,self.dataset)
+        self.assertEqual(code,0);self.assertTrue(result['complete']);self.assertEqual(result['model_runs'],2)
+        self.assertEqual({row['model_id'] for row in result['results']},{'model-a','model-b'})
+        output=self.root/'comparison.csv';compare_models.write_csv(output,result)
+        self.assertIn('IF_scored',output.read_text());self.assertIn('model-a',output.read_text())
+
+    def test_different_judges_are_not_merged(self):
+        self.create_run('model-a');self.create_run('model-b',judge_model='other-judge')
+        result,code=compare_models.compare_runs(self.runs,self.dataset)
+        self.assertEqual(code,2);self.assertFalse(result['complete'])
+        self.assertIn('Models differ in judge protocol',result['validation_errors'])
+        self.assertTrue(all(value is None for row in result['results'] for value in row['metrics'].values()))
+
+    def test_different_case_subsets_are_not_merged(self):
+        self.create_run('model-a',ids=('a',));self.create_run('model-b',ids=('b',))
+        result,code=compare_models.compare_runs(self.runs,self.dataset)
+        self.assertEqual(code,2);self.assertIn('Models differ in case_ids',result['validation_errors'])
+
+    def test_missing_model_pixel_scores_stay_incomplete_without_fake_zero(self):
+        self.create_run('model-a');bad=self.create_run('model-b');(bad/'pixel_scores.json').unlink()
+        result,code=compare_models.compare_runs(self.runs,self.dataset)
+        self.assertEqual(code,1);self.assertEqual(result['status'],'incomplete')
+        row=next(row for row in result['results'] if row['model_id']=='model-b')
+        self.assertIsNone(row['metrics']['mse']);self.assertFalse(row['complete'])
+        self.assertEqual(next(row for row in result['results'] if row['model_id']=='model-a')['metrics']['IF'],4)
+
+    def test_alignment_failure_keeps_complete_ssim_lpips_in_formal_and_comparison(self):
+        run=self.create_run()
+        partial={'mse':None,'psnr':None,'ssim':.99,'lpips':.01,
+            'metric_status':{'mse':'error','psnr':'error','ssim':'ok','lpips':'ok'},
+            'metric_errors':{'mse':'Official SIFT alignment failed','psnr':'Official SIFT alignment failed'}}
+        with contextlib.redirect_stdout(io.StringIO()),patch.object(evaluate,'score_case',return_value=partial),patch.object(evaluate,'_configure_runtime',return_value=[]):
+            code=evaluate.main(['--dataset-root',str(self.dataset),'--generation-manifest',str(run/'generation_manifest.json'),
+                '--ids','a','--output',str(run/'pixel_scores.json')])
+        self.assertEqual(code,1)
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,1);self.assertTrue(report['pixel_inputs_valid']);self.assertFalse(report['complete'])
+        self.assertIsNone(report['metrics']['mse']);self.assertIsNone(report['metrics']['psnr'])
+        self.assertEqual(report['metrics']['ssim'],.99);self.assertEqual(report['metrics']['lpips'],.01)
+        self.assertEqual(report['pixel_coverage']['mse']['failed'],1)
+        self.assertTrue(report['pixel_coverage']['ssim']['complete'])
+        result,code=compare_models.compare_runs(self.runs,self.dataset)
+        self.assertEqual(code,1);self.assertFalse(result['complete'])
+        self.assertEqual(result['results'][0]['metrics']['ssim'],.99)
+        self.assertIsNone(result['results'][0]['metrics']['psnr'])
+        # Current input binding is mandatory even for otherwise complete axes.
+        Image.new('L',(64,64),0).save(self.dataset/'cases/a/mask.png')
+        stale,_=formal_report.evaluate_run(run,self.dataset)
+        self.assertFalse(stale['pixel_inputs_valid'])
+        self.assertTrue(all(stale['metrics'][name] is None for name in formal_report.PIXEL_NAMES))
+
+    def test_one_api_dimension_failure_keeps_other_complete_means(self):
+        run=self.create_run(fail_dimension='TA')
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,1);self.assertTrue(report['semantic_inputs_valid']);self.assertFalse(report['semantic_complete'])
+        self.assertIsNone(report['metrics']['TA'])
+        for name in ('IF','VC','LP'):self.assertEqual(report['metrics'][name],4)
+        self.assertEqual(report['semantic_coverage']['TA']['coverage'],0)
+        self.assertEqual(report['semantic_coverage']['IF']['coverage'],1)
+        result,code=compare_models.compare_runs(self.runs,self.dataset)
+        self.assertEqual(code,1);self.assertFalse(result['complete'])
+        self.assertIsNone(result['results'][0]['metrics']['TA'])
+        self.assertEqual(result['results'][0]['metrics']['IF'],4)
+
+    def test_parallel_per_run_reports_do_not_touch_global_summary(self):
+        runs=[self.create_run('model-a'),self.create_run('model-b')]
+        def run(path):return formal_report.main(['--run-dir',str(path),'--dataset-root',str(self.dataset)])
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(list(pool.map(run,runs)),[0,0])
+        self.assertTrue(all((run/'report.json').exists() for run in runs))
+        self.assertEqual((self.dataset/'summary.json').read_bytes(),self.summary_before)
+
+
+if __name__=='__main__':unittest.main()
