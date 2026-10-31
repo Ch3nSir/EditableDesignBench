@@ -113,19 +113,21 @@ class AdapterContract(unittest.TestCase):
         code,result=self.run_evaluator('--generation-manifest',str(manifest))
         self.assertEqual(code,0);self.assertEqual(result['results'][0]['mse'],0.)
 
-    def test_reject_substantive_alpha_and_canvas_mismatch(self):
+    def test_accept_transparency_but_still_reject_canvas_mismatch(self):
         raw=self.raw(alpha=0);before=raw.read_bytes();export=self.root/'rgb.png'
         record=prepare_rgb_record(raw,export,self.metadata())
-        self.assertEqual(record['status'],'rejected_alpha');self.assertFalse(export.exists());self.assertEqual(raw.read_bytes(),before)
+        self.assertEqual(record['status'],'complete');self.assertTrue(export.exists());self.assertEqual(raw.read_bytes(),before)
+        pixels,_=load_prediction(self.task,self.dataset,record=record,manifest_path=self.root/'manifest.json')
+        np.testing.assert_array_equal(pixels,self.rgb)
         meta=self.metadata();meta['canvas_size']=[32,32];meta['padding'].update(right=0,bottom=0)
         with self.assertRaisesRegex(ValueError,'Actual output'):prepare_rgb_record(raw,export,meta)
 
-    def test_alpha_threshold_boundary(self):
-        for count,level,expected in [(1,249,'complete'),(2,249,'rejected_alpha'),(1,127,'rejected_alpha')]:
+    def test_old_alpha_thresholds_no_longer_reject_outputs(self):
+        for count,level in [(1,249),(2,249),(1,127),(1024,0)]:
             raw=self.raw();pixels=np.asarray(Image.open(raw)).copy();pixels.reshape(-1,4)[:count,3]=level
             Image.fromarray(pixels).save(raw)
             record=prepare_rgb_record(raw,self.root/f'rgb-{count}-{level}.png',self.metadata())
-            self.assertEqual(record['status'],expected)
+            self.assertEqual(record['status'],'complete')
 
     def test_stale_instruction_and_hash_tampering_fail(self):
         raw=self.raw();record=prepare_rgb_record(raw,self.root/'rgb.png',self.metadata());manifest=self.root/'m.json'

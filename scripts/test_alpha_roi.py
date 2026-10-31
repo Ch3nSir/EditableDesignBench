@@ -1,4 +1,4 @@
-"""Native-ROI alpha eligibility and immutable RGB output provenance contracts."""
+"""Diagnostic-only alpha and immutable RGB/native-ROI provenance contracts."""
 import copy
 import json
 from pathlib import Path
@@ -67,29 +67,34 @@ class NativeAlphaTests(unittest.TestCase):
         self.assertEqual(provenance['rgb_sha256'],sha256_file(export))
         self.assertEqual(provenance['generation_protocol_sha256'],'a'*64)
 
-    def test_native_transparency_is_rejected_even_when_padding_is_opaque(self):
+    def test_fully_transparent_native_pixels_keep_exact_rgb_without_compositing(self):
         raw,meta=self.fixture(native_alpha=0)
         before=raw.read_bytes();export=self.root/'rgb.png'
         record=prepare_rgb_record(raw,export,meta)
-        self.assertEqual(record['status'],'rejected_alpha')
-        self.assertIn('native evaluation ROI',record['error'])
-        self.assertFalse(export.exists());self.assertEqual(raw.read_bytes(),before)
+        self.assertEqual(record['status'],'complete')
+        output,provenance=self.load(record)
+        np.testing.assert_array_equal(output,self.rgb)
+        self.assertEqual(provenance['alpha_evaluation_roi']['minimum'],0)
+        self.assertEqual(provenance['alpha_evaluation_roi']['fraction_below_128'],1)
+        self.assertTrue(export.exists());self.assertEqual(raw.read_bytes(),before)
 
-    def test_native_fraction_threshold_uses_native_denominator(self):
-        for count,expected in [(1,'complete'),(2,'rejected_alpha')]:
+    def test_native_alpha_fraction_is_diagnostic_and_uses_native_denominator(self):
+        for count in [1,2,32]:
             raw,meta=self.fixture(padding_alpha=0)
             pixels=np.asarray(Image.open(raw)).copy()
             pixels[0,:count,3]=249
             Image.fromarray(pixels).save(raw)
             record=prepare_rgb_record(raw,self.root/f'export-{count}.png',meta)
-            self.assertEqual(record['status'],expected)
+            self.assertEqual(record['status'],'complete')
             self.assertEqual(record['alpha']['fraction_below_250'],count/1024)
+            np.testing.assert_array_equal(self.load(record)[0],self.rgb)
 
     def test_no_padding_uses_same_policy(self):
-        for alpha,status in [(255,'complete'),(127,'rejected_alpha')]:
+        for alpha in [255,250,249,128,127,0]:
             raw,meta=self.fixture(padding=False,native_alpha=alpha)
             record=prepare_rgb_record(raw,self.root/f'export-{alpha}.png',meta)
-            self.assertEqual(record['status'],status)
+            self.assertEqual(record['status'],'complete')
+            np.testing.assert_array_equal(self.load(record)[0],self.rgb)
             roi=dict(record['alpha']);roi.pop('scope')
             self.assertEqual(roi,record['alpha_canvas'])
 
@@ -103,14 +108,24 @@ class NativeAlphaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Inconsistent padding'):
             prepare_rgb_record(raw,self.root/'rgb.png',meta)
 
-    def test_load_rechecks_native_alpha_instead_of_trusting_record_statistics(self):
+    def test_load_recomputes_alpha_statistics_without_rejecting_or_trusting_saved_statistics(self):
         raw,meta=self.fixture(padding_alpha=0)
         record=prepare_rgb_record(raw,self.root/'rgb.png',meta)
         pixels=np.asarray(Image.open(raw)).copy();pixels[0,0,3]=0
         Image.fromarray(pixels).save(raw)
         record['raw_sha256']=sha256_file(raw)
         record['alpha']['minimum']=255
-        with self.assertRaisesRegex(ValueError,'native evaluation ROI'):
+        output,provenance=self.load(record)
+        np.testing.assert_array_equal(output,self.rgb)
+        self.assertEqual(provenance['alpha_evaluation_roi']['minimum'],0)
+        self.assertEqual(provenance['alpha_evaluation_roi']['fraction_below_128'],1/1024)
+
+    def test_alpha_only_raw_tampering_still_fails_hash_validation(self):
+        raw,meta=self.fixture()
+        record=prepare_rgb_record(raw,self.root/'rgb.png',meta)
+        pixels=np.asarray(Image.open(raw)).copy();pixels[0,0,3]=0
+        Image.fromarray(pixels).save(raw)
+        with self.assertRaisesRegex(ValueError,'Raw output hash mismatch'):
             self.load(record)
 
     def test_legacy_v1_record_is_read_without_rewriting_or_claiming_new_generation(self):

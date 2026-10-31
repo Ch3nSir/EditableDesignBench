@@ -8,8 +8,10 @@ from PIL import Image
 
 ADAPTER_VERSION = 'raw-rgb-roi-v2'
 READABLE_ADAPTER_VERSIONS = {'raw-rgb-roi-v1', ADAPTER_VERSION}
-ALPHA_POLICY = ('Native evaluation ROI only: no alpha<128; fraction(alpha<250)<0.001; '
-                'padding alpha is diagnostic only; RGB channels unchanged, no compositing')
+# The RGB/ROI format remains v2: only alpha eligibility changes. Keeping the
+# format identity preserves scores for already accepted, identical RGB inputs.
+ALPHA_POLICY = ('Alpha is diagnostic only; all alpha values accepted; '
+                'RGB channels unchanged, no compositing; raw output retained')
 
 
 def sha256_file(path):
@@ -53,16 +55,15 @@ def _alpha_stats(alpha):
 
 
 def _alpha_diagnostics(pixels,native):
-    """Inspect only the declared native ROI for eligibility; never change pixels."""
+    """Record native ROI and full-canvas alpha statistics; never gate or change pixels."""
     alpha=pixels[:,:,3] if pixels.shape[2]==4 else np.full(pixels.shape[:2],255,np.uint8)
     canvas_stats=_alpha_stats(alpha)
     roi_stats=_alpha_stats(alpha[:native[1],:native[0]])
-    valid=(roi_stats['fraction_below_128']==0 and roi_stats['fraction_below_250']<.001)
-    return valid,{'scope':'native_evaluation_roi',**roi_stats},canvas_stats
+    return {'scope':'native_evaluation_roi',**roi_stats},canvas_stats
 
 
 def prepare_rgb_record(raw_output, rgb_output, metadata):
-    """Export RGB channels separately; retain raw bytes. Return rejected_alpha if needed.
+    """Export exact RGB channels separately; retain raw bytes and diagnose alpha.
 
     Required metadata: id, source_size, canvas_size, evaluation_roi, padding,
     source_sha256, instruction_sha256. Extra seed/model/steps metadata is retained.
@@ -80,11 +81,8 @@ def prepare_rgb_record(raw_output, rgb_output, metadata):
         if image.size!=canvas:raise ValueError(f'Actual output {image.size} != requested canvas {canvas}')
         if image.mode not in {'RGB','RGBA'}:raise ValueError(f'Unsupported raw mode: {image.mode}')
         pixels=np.asarray(image)
-        opaque,record['alpha'],record['alpha_canvas']=_alpha_diagnostics(pixels,native)
+        record['alpha'],record['alpha_canvas']=_alpha_diagnostics(pixels,native)
         record['alpha_policy']=ALPHA_POLICY
-        if not opaque:
-            record.update(status='rejected_alpha',error='Substantive transparency in native evaluation ROI; raw retained, RGB export rejected')
-            return record
         if raw_path==rgb_path:
             if image.mode!='RGB':raise ValueError('RGBA export needs separate path; raw output is immutable')
         else:
@@ -170,8 +168,7 @@ def load_prediction(task,dataset_root,*,predictions_dir=None,record=None,manifes
         if image.mode!='RGB' or raw.mode not in {'RGB','RGBA'}:raise ValueError('Invalid raw or exported image mode')
         pixels=np.asarray(image);raw_pixels=np.asarray(raw)
         if not np.array_equal(pixels,raw_pixels[:,:,:3]):raise ValueError('RGB export differs from raw RGB channels')
-        opaque,alpha_roi,alpha_canvas=_alpha_diagnostics(raw_pixels,native)
-        if not opaque:raise ValueError('Raw alpha in native evaluation ROI violates near-opaque policy')
+        alpha_roi,alpha_canvas=_alpha_diagnostics(raw_pixels,native)
         result=pixels[:native[1],:native[0]].copy()
     provenance={'mode':'recorded_padding_roi','manifest':str(Path(manifest_path).resolve()),
         'raw_output':str(raw_path.resolve()),'raw_sha256':record['raw_sha256'],

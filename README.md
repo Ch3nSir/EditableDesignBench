@@ -58,6 +58,8 @@ python scripts/bench.py generate --models flux3-klein --all --output-root output
 
 前三种已做真实 GPU 测试，后三种已实现适配，尚未完成真实 GPU 生成验证。权重存放在 `models/`；如下载提示需要授权，在模型页面接受许可后运行 `hf auth login`。
 
+模型原始输出完整保留。RGBA 输出直接提取原始 RGB 三通道供评测，不叠加背景；Alpha 仅记录统计，不影响评测资格。
+
 先试一张时，把 `--all` 换成 `--ids 000_delete`，并使用单独的输出目录。已有其他模型生成的图片，可跳过这一步，直接使用下一节的图片评分命令。新增模型配置见[进阶用法](docs/advanced.md)。
 
 ## 5. 评分

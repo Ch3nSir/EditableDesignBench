@@ -101,6 +101,17 @@ class PixelResumeTests(unittest.TestCase):
         self.output.write_text(json.dumps(document));evaluate.cache_path(self.output).unlink();self.calls=[]
         self.assertEqual(self.invoke(),0);self.assertEqual(self.calls,[])
 
+    def test_alpha_policy_diagnostics_change_keeps_validated_rgb_scores(self):
+        self.assertEqual(self.invoke(),0)
+        document=self.report()
+        for row in document['results']:
+            row['provenance']['alpha_policy']='Legacy near-opaque alpha gate'
+        document['protocol']['evaluator_sources']['evaluate.py']['sha256']='3ec5a54f267b25c4363ab375790446356108805e8f52b61febfe5069d1fbc0f1'
+        document['protocol']['evaluator_sources']['output_adapter.py']['sha256']='0d22becf61d07def54a37a4f5615b86cbc91de757ee571c359360021a3fe0169'
+        self.output.write_text(json.dumps(document));evaluate.cache_path(self.output).unlink();self.calls=[]
+        self.assertEqual(self.invoke(),0);self.assertEqual(self.calls,[])
+        self.assertEqual(self.report()['resume']['reused_metrics'],8)
+
     def test_unknown_code_or_device_changes_do_not_reuse_scores(self):
         self.assertEqual(self.invoke(),0)
         document=self.report();document['protocol']['evaluator_sources']['evaluate.py']['sha256']='0'*64

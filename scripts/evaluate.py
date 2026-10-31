@@ -26,12 +26,14 @@ from official_pixel_metrics import (
 
 ROOT=Path(__file__).resolve().parents[1]
 
-# Verified pre-resume wrappers. This release changes scheduling/caching only;
-# the upstream formulas and their source bytes remain identical. Unknown
-# implementation changes never qualify for this one-release migration.
+# Verified prior wrappers: metric formulas and accepted RGB/ROI inputs remain
+# identical. Removing the alpha gate admits new inputs without changing scores
+# of previously accepted inputs. Unknown implementation changes invalidate reuse.
 COMPATIBLE_WRAPPERS={
-    'evaluate.py':{'05e968d463b0583e3a1d251007190677c2b8ead709088ee4cde5af91d33dac13'},
+    'evaluate.py':{'05e968d463b0583e3a1d251007190677c2b8ead709088ee4cde5af91d33dac13',
+                   '3ec5a54f267b25c4363ab375790446356108805e8f52b61febfe5069d1fbc0f1'},
     'official_pixel_metrics.py':{'074806c9dd10dbbd26c8375cb632b9230aecdd10fe1af8e21d537fd6f8fa6055'},
+    'output_adapter.py':{'0d22becf61d07def54a37a4f5615b86cbc91de757ee571c359360021a3fe0169'},
 }
 
 
@@ -119,9 +121,12 @@ def load_pixel_cache(output):
 
 def cached_scores(cache,protocol,row):
     scores={};binding=row['input_binding']
+    # Alpha policy text is diagnostic. RGB/raw hashes, geometry and all other
+    # provenance still have to match after live output validation above.
+    identity=lambda value:{k:v for k,v in value.items() if k!='alpha_policy'}
     for key,previous in cache['protocols'].items():
         record=cache['records'].get((key,row['id'],binding['sha256']))
-        if (record and record['input_binding']==binding and record['provenance']==row['provenance']
+        if (record and record['input_binding']==binding and identity(record['provenance'])==identity(row['provenance'])
                 and _compatible_protocol(previous,protocol)):
             scores.update(record['scores'])
     return scores

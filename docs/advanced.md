@@ -68,6 +68,8 @@ python scripts/mllm_evaluate.py \
 
 生成器只读取原图和指令，不读取目标图或 mask。原图只在右侧和底部补边到 32 的倍数。模型原始返回图完整保留，评测时在内存中去掉额外补边。直接提交的预测图须为原生尺寸 RGB PNG，不能将带补边图片当作原生尺寸图片提交。
 
+RGBA 输出接受任意 Alpha 值，Alpha 仅用于诊断记录。评测输入直接取原始 RGB 三通道，不叠白底、不进行 Alpha 合成；原始 RGBA 文件保持不变。尺寸、补边、输入来源及 RGB 一致性检查仍会执行。
+
 ## 子集、续跑与汇总
 
 首次测试可使用 `generate --ids 000_delete`。生成后评分会自动使用记录的同一组任务。为其他模型图片评分时，用 `evaluate --predictions predictions/MyModel --ids 000_delete` 指定子集，默认评测全部 400 例。
