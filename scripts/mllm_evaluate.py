@@ -453,6 +453,10 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
     positions={r['id']:i for i,r in enumerate(report['results'])}
     state_lock=Lock();stop=Event()
     counts={'done':0,'failed':0,'cached':0,'cases':0}
+    report['resume']={'enabled':args.resume,'cached_dimensions':0}
+    if args.resume and old and getattr(args,'progress',True):
+        available=sum(len(record['dimensions']) for record in old.values())
+        print(f'MLLM resume: {available} successful cached dimensions found; validating inputs before reuse.',file=sys.stderr,flush=True)
     total_dimensions=sum(len(STANDARD_DIMENSIONS)+(isinstance(task.get('knowledge_prompt'),str)
                          and bool(task['knowledge_prompt'].strip())) for task in tasks)
     report['execution']={'workers':workers,'concurrency_unit':'case','maximum_simultaneous_api_requests':workers}
@@ -466,6 +470,7 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
         # writes are serialized. Network requests and retry waits are outside it.
         # Persist the paid response before its report checkpoint. A subsequent
         # report I/O failure or interruption can then resume without re-paying.
+        report['resume']['cached_dimensions']=counts['cached']
         merge_cached_scores(old,report['results'])
         write_json(cache_path(args.output),{'schema_version':CACHE_SCHEMA_VERSION,'records':list(old.values())})
         report['summary']=summarize(report['results']);write_json(args.output,report)

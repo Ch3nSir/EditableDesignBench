@@ -100,7 +100,7 @@ def _inputs(source_rgb, prediction_rgb, source_mask, target_mask):
 
 
 def score_case(source_rgb, prediction_rgb, source_mask, target_mask, *,
-               device='cpu', official_dir: Path | str | None = None) -> dict:
+               device='cpu', official_dir: Path | str | None = None, metrics=None) -> dict:
     """Compute official scores with independent, explicit per-metric failures.
 
     Returned keys are mse, psnr, ssim, lpips. MSE/PSNR are rounded exactly where
@@ -110,17 +110,20 @@ def score_case(source_rgb, prediction_rgb, source_mask, target_mask, *,
     in metric_status. Common invalid input geometry/dtypes still raise.
     """
     source, prediction, masks = _inputs(source_rgb, prediction_rgb, source_mask, target_mask)
+    selected=set(METRICS if metrics is None else metrics)
+    if selected-set(METRICS):raise ValueError('Unknown requested pixel metrics')
     official_dir = str(resolve_official_evaluation(official_dir))
     result = {key: None for key in METRICS}
-    result['metric_status'] = {key: 'error' for key in METRICS}
+    result['metric_status'] = {key: 'error' if key in selected else 'skipped' for key in METRICS}
     result['metric_errors'] = {}
 
     def failed(keys, exc):
         reason = f'{type(exc).__name__}: {exc}'
-        for key in keys:
+        for key in set(keys)&selected:
             result['metric_errors'][key] = reason
 
     def scored(key, value):
+        if key not in selected:return
         try:
             if value is None:
                 raise OfficialMetricError(f'Official {key.upper()} returned no score')
@@ -136,21 +139,23 @@ def score_case(source_rgb, prediction_rgb, source_mask, target_mask, *,
     # reversal is lossless and does not modify the original arrays/files.
     import cv2
     combined_mask = cv2.bitwise_or(masks[0], masks[1])
-    try:
-        mse_module = _load_official(official_dir, 'mse_psnr')
-        source_bgr = cv2.cvtColor(source, cv2.COLOR_RGB2BGR)
-        prediction_bgr = cv2.cvtColor(prediction, cv2.COLOR_RGB2BGR)
-        aligned = mse_module.align_images(source_bgr, prediction_bgr)
-        if aligned is None:
-            raise OfficialMetricError('Official SIFT/FLANN/LMEDS image alignment failed')
-        mse, psnr = mse_module.calculate_masked_metrics(source_bgr, aligned, combined_mask)
-        if mse is None and psnr is None:
-            raise OfficialMetricError('Official masked MSE/PSNR has no valid background pixels')
-        scored('mse', mse)
-        scored('psnr', psnr)
-    except Exception as exc:
-        failed(('mse', 'psnr'), exc)
+    if selected&{'mse','psnr'}:
+        try:
+            mse_module = _load_official(official_dir, 'mse_psnr')
+            source_bgr = cv2.cvtColor(source, cv2.COLOR_RGB2BGR)
+            prediction_bgr = cv2.cvtColor(prediction, cv2.COLOR_RGB2BGR)
+            aligned = mse_module.align_images(source_bgr, prediction_bgr)
+            if aligned is None:
+                raise OfficialMetricError('Official SIFT/FLANN/LMEDS image alignment failed')
+            mse, psnr = mse_module.calculate_masked_metrics(source_bgr, aligned, combined_mask)
+            if mse is None and psnr is None:
+                raise OfficialMetricError('Official masked MSE/PSNR has no valid background pixels')
+            scored('mse', mse)
+            scored('psnr', psnr)
+        except Exception as exc:
+            failed(('mse', 'psnr'), exc)
 
+    if not selected&{'ssim','lpips'}:return result
     inverse_mask = (combined_mask < 128).astype(np.uint8)*255
     try:
         perceptual_module = _load_official(official_dir, 'lipis_ssim')
@@ -158,6 +163,7 @@ def score_case(source_rgb, prediction_rgb, source_mask, target_mask, *,
         failed(('ssim', 'lpips'), exc)
     else:
         for key in ('ssim', 'lpips'):
+            if key not in selected:continue
             try:
                 # The official __init__ eagerly constructs LPIPS before SSIM.
                 # Build its container and the requested metric separately with

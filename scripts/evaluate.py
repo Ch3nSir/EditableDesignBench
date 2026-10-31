@@ -5,9 +5,13 @@ Missing/invalid outputs still fail explicitly; model output files stay unchanged
 """
 from settings import DATASET_ROOT, MODEL_ROOT
 import argparse
+from contextlib import contextmanager
+from copy import deepcopy
+import fcntl
 import importlib.metadata
 import json
 import math
+import shutil
 from pathlib import Path
 import sys
 
@@ -15,12 +19,112 @@ import numpy as np
 from PIL import Image
 
 from output_adapter import load_generation_records, load_prediction
-from evaluation_binding import BINDING_VERSION, case_binding, dataset_identity, pixel_sources
+from evaluation_binding import BINDING_VERSION, canonical_hash, case_binding, dataset_identity, pixel_sources, write_json
 from official_pixel_metrics import (
     METRICS, PROTOCOL_VERSION, OFFICIAL_EVALUATION, protocol_info, score_case,
 )
 
 ROOT=Path(__file__).resolve().parents[1]
+
+# Verified pre-resume wrappers. This release changes scheduling/caching only;
+# the upstream formulas and their source bytes remain identical. Unknown
+# implementation changes never qualify for this one-release migration.
+COMPATIBLE_WRAPPERS={
+    'evaluate.py':{'05e968d463b0583e3a1d251007190677c2b8ead709088ee4cde5af91d33dac13'},
+    'official_pixel_metrics.py':{'074806c9dd10dbbd26c8375cb632b9230aecdd10fe1af8e21d537fd6f8fa6055'},
+}
+
+
+def cache_path(output):return output.with_name(output.name+'.cache.json')
+
+
+@contextmanager
+def output_lock(output):
+    output.parent.mkdir(parents=True,exist_ok=True)
+    with output.with_name(output.name+'.lock').open('a+b') as stream:
+        try:fcntl.flock(stream,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:raise ValueError('Pixel output already has an active evaluation') from None
+        try:yield
+        finally:fcntl.flock(stream,fcntl.LOCK_UN)
+
+
+def _protocol_key(protocol):
+    return canonical_hash({k:v for k,v in protocol.items() if k!='runtime_warnings'})
+
+
+def _compatible_protocol(previous,current):
+    ignored={'runtime_warnings','evaluator_sources'}
+    if {k:v for k,v in previous.items() if k not in ignored}!={k:v for k,v in current.items() if k not in ignored}:return False
+    old_sources=previous.get('evaluator_sources',{});new_sources=current['evaluator_sources']
+    if set(old_sources)!=set(new_sources):return False
+    for name,source in new_sources.items():
+        old=old_sources[name]
+        if old.get('path')!=source['path']:return False
+        if old.get('sha256') not in {source['sha256'],*COMPATIBLE_WRAPPERS.get(name,set())}:return False
+    return True
+
+
+def _cached_number(name,value):
+    if name=='psnr' and value=='inf':return math.inf
+    if isinstance(value,bool) or not isinstance(value,(int,float)):return None
+    value=float(value)
+    if not math.isfinite(value) and not (name=='psnr' and value==math.inf):return None
+    if name in ('mse','psnr','lpips') and value<0:return None
+    if name=='mse' and value>65025:return None
+    if name=='ssim' and not -1<=value<=1:return None
+    return value
+
+
+def merge_pixel_cache(cache,protocol,rows):
+    key=_protocol_key(protocol)
+    for row in rows:
+        binding=row.get('input_binding') or {};provenance=row.get('provenance')
+        if not isinstance(binding.get('sha256'),str) or not isinstance(provenance,dict):continue
+        if canonical_hash({k:v for k,v in binding.items() if k!='sha256'})!=binding['sha256']:continue
+        good={}
+        for name in METRICS:
+            if row.get('metric_status',{}).get(name)!='ok':continue
+            value=_cached_number(name,row.get(name))
+            if value is not None:good[name]=value
+        if not good:continue
+        cache['protocols'][key]=deepcopy(protocol)
+        slot=(key,row['id'],binding['sha256'])
+        if slot not in cache['records']:
+            cache['records'][slot]={'protocol_key':key,'id':row['id'],'input_binding':deepcopy(binding),
+                                    'provenance':deepcopy(provenance),'scores':{}}
+        cache['records'][slot]['scores'].update(good)
+
+
+def load_pixel_cache(output):
+    cache={'protocols':{},'records':{}}
+    if output.exists():
+        report=json.loads(output.read_text())
+        if not isinstance(report,dict) or not isinstance(report.get('results'),list):raise ValueError('Invalid existing pixel report; output preserved')
+        merge_pixel_cache(cache,report.get('protocol',{}),report['results'])
+    path=cache_path(output)
+    if path.exists():
+        saved=json.loads(path.read_text())
+        if saved.get('schema_version')!=1 or not isinstance(saved.get('protocols'),dict) or not isinstance(saved.get('records'),list):
+            raise ValueError('Invalid pixel resume cache; output preserved')
+        for key,protocol in saved['protocols'].items():
+            if _protocol_key(protocol)!=key:raise ValueError('Pixel cache protocol fingerprint mismatch')
+            cache['protocols'][key]=protocol
+        for record in saved['records']:
+            protocol=cache['protocols'].get(record.get('protocol_key'))
+            if protocol is None:raise ValueError('Pixel cache record has no protocol')
+            row={**record,**record.get('scores',{}),'metric_status':dict.fromkeys(record.get('scores',{}),'ok')}
+            merge_pixel_cache(cache,protocol,[row])
+    return cache
+
+
+def cached_scores(cache,protocol,row):
+    scores={};binding=row['input_binding']
+    for key,previous in cache['protocols'].items():
+        record=cache['records'].get((key,row['id'],binding['sha256']))
+        if (record and record['input_binding']==binding and record['provenance']==row['provenance']
+                and _compatible_protocol(previous,protocol)):
+            scores.update(record['scores'])
+    return scores
 
 
 def summarize(results):
@@ -92,9 +196,7 @@ def _json_safe(value):
 
 
 def _dump(path,value):
-    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
-    temporary=path.with_name(path.name+'.tmp')
-    temporary.write_text(json.dumps(_json_safe(value),ensure_ascii=False,indent=2,allow_nan=False)+'\n');temporary.replace(path)
+    write_json(path,_json_safe(value))
 
 
 def _load_tasks(dataset_root,ids):
@@ -142,7 +244,18 @@ def main(argv=None):
     parser.add_argument('--device',choices=('cpu','cuda'),default='cpu',help='Official SSIM/LPIPS compute device; CUDA requires a GPU allocation')
     parser.add_argument('--official-evaluation-dir',type=Path,default=OFFICIAL_EVALUATION)
     parser.add_argument('--cpu-threads',type=int,default=2,help='CPU thread limit for SIFT/PyTorch; does not change metric formulas')
+    parser.add_argument('--no-resume',action='store_false',dest='resume',help='Recompute successful metrics as well; default reuses validated successes')
     args=parser.parse_args(argv)
+    args.output=args.output.resolve()
+    try:
+        with output_lock(args.output):return _evaluate(args)
+    except Exception as exc:
+        error=args.output.with_name(args.output.name+'.error.json')
+        _dump(error,{'status':'invalid_request','fatal_errors':[str(exc)],'evaluation_output_preserved':True})
+        print(str(exc),file=sys.stderr);return 2
+
+
+def _evaluate(args):
     protocol={'version':PROTOCOL_VERSION}
     try:
         if args.cpu_threads<1:raise ValueError('--cpu-threads must be positive')
@@ -167,23 +280,32 @@ def main(argv=None):
     except Exception as exc:
         result={'status':'invalid_request','protocol':protocol,'attempted':0,'valid':0,'failed':0,
                 'complete':False,'coverage':0.0,'fatal_errors':[str(exc)],'summary':None,'results':[]}
-        _dump(args.output,result);print(str(exc),file=sys.stderr);return 2
+        error=args.output.with_name(args.output.name+'.error.json') if args.output.exists() else args.output
+        _dump(error,result);print(str(exc),file=sys.stderr);return 2
+    cache=load_pixel_cache(args.output)
+    for path in (args.output,cache_path(args.output)):
+        if path.exists():shutil.copy2(path,path.with_name(path.name+'.bak'))
+    resume={'enabled':args.resume,'reused_metrics':0,'computed_metrics':0,'skipped_cases':0}
     results=[{'id':t['id'],'operation':t.get('operation','unknown'),'domain':t.get('domain','unknown'),
               'status':'pending',**{name:None for name in METRICS},
               'metric_status':{name:'pending' for name in METRICS},'metric_errors':{}} for t in tasks]
-    def checkpoint():
+    def checkpoint(persist_cache=True):
+        if persist_cache:
+            merge_pixel_cache(cache,protocol,results)
+            _dump(cache_path(args.output),{'schema_version':1,'protocols':cache['protocols'],'records':list(cache['records'].values())})
         summary=summarize(results)
         groups=lambda field:{key:summarize([r for r in results if r[field]==key]) for key in sorted({r[field] for r in results})}
         status='running' if summary['pending'] else 'complete' if summary['complete'] else 'incomplete'
         output={'status':status,'protocol':protocol,'attempted':len(results)-summary['pending'],
             'expected':len(results),'valid':summary['valid'],'failed':summary['failed'],'partial':summary['partial'],'pending':summary['pending'],
             'coverage':summary['coverage'],'complete':summary['complete'],'summary':summary,
-            'by_operation':groups('operation'),'by_domain':groups('domain'),'results':results}
+            'by_operation':groups('operation'),'by_domain':groups('domain'),'results':results,'resume':dict(resume)}
         _dump(args.output,output);return output
     checkpoint()
     initialized=False
     for task,row in zip(tasks,results):
         stage='input'
+        kept={};needed=list(METRICS)
         try:
             prediction,provenance=load_prediction(task,args.dataset_root,predictions_dir=args.predictions,
                 record=records.get(task['id']),manifest_path=args.generation_manifest)
@@ -200,19 +322,40 @@ def main(argv=None):
             if prediction.shape!=source.shape:raise ValueError('Source and prediction dimensions differ')
             row['provenance']=provenance
             row['input_binding']=case_binding(task,args.dataset_root,provenance,masks=True)
+            kept=cached_scores(cache,protocol,row) if args.resume else {}
+            needed=[name for name in METRICS if name not in kept]
+            resume['reused_metrics']+=len(kept)
+            if not needed:
+                _scored_row(row,{**kept,'metric_status':dict.fromkeys(METRICS,'ok'),'metric_errors':{}})
+                resume['skipped_cases']+=1
+                checkpoint(persist_cache=False);print(json.dumps({'id':task['id'],'status':'cached','reused_metrics':list(kept),'computed_metrics':[]}),flush=True)
+                continue
             if not initialized:
                 stage='runtime'
                 protocol['runtime_warnings']=_configure_runtime(args) or []
                 initialized=True
             stage='metrics'
-            _scored_row(row,score_case(source,prediction,masks[0],masks[1],device=args.device,
-                official_dir=args.official_evaluation_dir))
-        except Exception as exc:_failed_row(row,exc,stage)
+            resume['computed_metrics']+=len(needed)
+            kwargs={'device':args.device,'official_dir':args.official_evaluation_dir}
+            if kept:kwargs['metrics']=needed
+            scores=score_case(source,prediction,masks[0],masks[1],**kwargs)
+            merged={**scores,**kept,'metric_status':{**scores['metric_status'],**dict.fromkeys(kept,'ok')},
+                    'metric_errors':{key:value for key,value in scores['metric_errors'].items() if key not in kept}}
+            _scored_row(row,merged)
+        except Exception as exc:
+            if kept:
+                reason=f'{type(exc).__name__}: {exc}'
+                _scored_row(row,{**dict.fromkeys(METRICS),**kept,
+                    'metric_status':{name:'ok' if name in kept else 'error' for name in METRICS},
+                    'metric_errors':{name:reason for name in METRICS if name not in kept}})
+                row['failure_stage']=stage
+            else:_failed_row(row,exc,stage)
         checkpoint();print(json.dumps({'id':task['id'],'status':row['status'],
-            'metric_status':row['metric_status'],'metric_errors':row['metric_errors']}),flush=True)
+            'metric_status':row['metric_status'],'metric_errors':row['metric_errors'],
+            'reused_metrics':list(kept),'computed_metrics':needed if stage=='metrics' else []}),flush=True)
     summary=summarize(results);output=checkpoint()
     print(json.dumps({'status':output['status'],'attempted':len(results),'valid':summary['valid'],
-        'failed':summary['failed'],'coverage':summary['coverage'],'output':str(args.output)}))
+        'failed':summary['failed'],'coverage':summary['coverage'],'output':str(args.output),'resume':resume}))
     return 0 if summary['complete'] else 1
 
 

@@ -174,6 +174,19 @@ class BenchCLITests(unittest.TestCase):
         command=self.calls[-1]
         self.assertEqual(command[command.index('--workers')+1],'10')
 
+    def test_force_recompute_flag_reaches_both_scoring_tracks(self):
+        self.make_protocols()
+        with patch.object(bench,'run_command',side_effect=self.local):
+            self.assertEqual(self.invoke('evaluate','--runs-root',str(self.experiment),'--dry-run','--no-resume'),0)
+        scoring=[command for command in self.calls if Path(command[1]).name in ('evaluate.py','mllm_evaluate.py')]
+        self.assertTrue(scoring)
+        self.assertTrue(all('--no-resume' in command for command in scoring))
+        predictions=self.root/'predictions';predictions.mkdir();self.calls=[]
+        with patch.object(bench,'run_command',side_effect=self.local):
+            self.assertEqual(self.invoke('evaluate','--predictions',str(predictions),'--dataset-root',str(self.dataset),
+                '--output-dir',str(self.root/'scores'),'--dry-run','--no-resume'),0)
+        self.assertTrue(all('--no-resume' in command for command in self.calls))
+
     def test_missing_formal_credentials_fail_before_any_process_or_jobs(self):
         with patch.dict(os.environ,{},clear=True),patch.object(bench.subprocess,'run',side_effect=AssertionError('A job/API process started')):
             code=self.invoke('evaluate','--runs-root',str(self.experiment),'--submit')

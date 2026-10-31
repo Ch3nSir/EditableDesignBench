@@ -80,6 +80,8 @@ python scripts/bench.py evaluate --predictions predictions/MyModel --workers 10 
 
 `--workers` 控制每个评测进程并发处理的 case 数；不指定时默认 **5**，以上示例使用 **10**。终端自动显示维度进度、完成 case 数、失败数、缓存命中数、用时和预计剩余时间；添加 `--no-progress` 可关闭显示。
 
+**重复执行原命令即可断点续跑**：像素指标逐项复用成功值，MLLM 逐维度复用成功分数，只补算失败或未完成项。终端会显示 `cached` / `reused_metrics`；需要全部重算时才添加 `--no-resume`。
+
 两种评分命令都可以添加 `--pixel-only` 跳过 API；像素评分没有 GPU 时，将 `--device cuda` 改为 `--device cpu`。
 
 像素指标为 **MSE、PSNR、SSIM、LPIPS**，沿用 TextEditBench 的实现。MLLM 按 **IF、TA、VC、LP** 四个维度分别评分，每个任务四次独立请求；一个模型的完整 400 例共 1,600 次请求，不含重试。默认输入原图、结果图和指令，不提供目标图，不计算 SE。

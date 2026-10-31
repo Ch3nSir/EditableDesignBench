@@ -152,6 +152,18 @@ class OfficialParityTests(unittest.TestCase):
         self.assertIn('non-finite',result['metric_errors']['ssim'])
         self.assertEqual(result['metric_status']['lpips'],'ok')
 
+    def test_selected_metric_skips_unrequested_paths_and_preserves_numerical_value(self):
+        args=self.images();expected=self.direct_scores(*args)
+        module=metrics._load_official(str(metrics.OFFICIAL_EVALUATION.resolve()),'lipis_ssim')
+        with patch.object(module,'LearnedPerceptualImagePatchSimilarity',side_effect=AssertionError('LPIPS must be skipped')):
+            result=metrics.score_case(*args,metrics=['ssim'])
+        self.assertEqual(result['ssim'],expected['ssim'])
+        self.assertEqual(result['metric_status'],{'mse':'skipped','psnr':'skipped','ssim':'ok','lpips':'skipped'})
+        with patch.object(metrics,'_load_official',side_effect=lambda folder,stem:self.psnr_source if stem=='mse_psnr' else self.fail('Perceptual path must be skipped')):
+            cv2.setRNGSeed(421);result=metrics.score_case(*args,metrics=['mse'])
+        self.assertEqual(result['mse'],expected['mse'])
+        self.assertEqual(result['metric_status']['psnr'],'skipped')
+
     def test_input_arrays_are_not_mutated(self):
         args = self.images();before = [a.copy() for a in args]
         cv2.setRNGSeed(421);metrics.score_case(*args)

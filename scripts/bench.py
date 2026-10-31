@@ -282,6 +282,8 @@ def evaluation_commands(args,run,dataset,expected):
                   '--ids',','.join(load_tasks(dataset)) if expected=='all' else expected,
                   '--output',str(run/('mllm_pending.json' if args.dry_run else 'mllm_scores.json'))]
     if args.config is not None:judge.extend(['--config',str(args.config)])
+    if not getattr(args,'resume',True):
+        pixel.append('--no-resume');judge.append('--no-resume')
     judge.extend(['--workers',str(getattr(args,'workers',5))])
     if not getattr(args,'progress',True):judge.append('--no-progress')
     judge.append('--dry-run' if args.dry_run else '--require-scoring')
@@ -324,6 +326,7 @@ def _stage_command(args,root,dataset,model,stage):
     command=[args.python,str(SCRIPTS/'bench.py'),'evaluate','--runs-root',str(root),'--dataset-root',str(dataset),
              '--models',model,'--stage',stage,'--no-compare','--device','cuda' if stage=='pixel' else 'cpu']
     if args.config is not None:command.extend(['--config',str(args.config)])
+    if not getattr(args,'resume',True):command.append('--no-resume')
     command.extend(['--workers',str(getattr(args,'workers',5))])
     if not getattr(args,'progress',True):command.append('--no-progress')
     if args.pixel_only:command.append('--pixel-only')
@@ -349,6 +352,8 @@ def evaluate_predictions(args):
            '--predictions',str(predictions),'--ids',ids,
            '--output',str(output/('mllm_pending.json' if args.dry_run else 'mllm_scores.json'))]
     if args.config is not None:judge.extend(['--config',str(args.config)])
+    if not getattr(args,'resume',True):
+        pixel.append('--no-resume');judge.append('--no-resume')
     judge.extend(['--workers',str(getattr(args,'workers',5))])
     if not getattr(args,'progress',True):judge.append('--no-progress')
     judge.append('--dry-run' if args.dry_run else '--require-scoring')
@@ -429,6 +434,7 @@ def parser():
     eval_p.add_argument('--ids',help='Comma-separated subset for --predictions; default all dataset cases')
     eval_p.add_argument('--dataset-root',type=Path)
     eval_p.add_argument('--models',default='all');eval_p.add_argument('--config',type=Path)
+    eval_p.add_argument('--no-resume',action='store_false',dest='resume',help='Force recomputation; default skips validated successful pixel metrics and judge dimensions')
     eval_p.add_argument('--workers',type=int,default=5,help='Concurrent judge cases / maximum simultaneous API requests (1-32; default 5)')
     eval_p.add_argument('--progress',action=argparse.BooleanOptionalAction,default=True,help='Show judge progress (default enabled)')
     modes=eval_p.add_mutually_exclusive_group();modes.add_argument('--pixel-only',action='store_true');modes.add_argument('--dry-run',action='store_true')

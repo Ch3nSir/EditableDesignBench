@@ -170,7 +170,7 @@ class FormalReportingTests(unittest.TestCase):
             'metric_errors':{'mse':'Official SIFT alignment failed','psnr':'Official SIFT alignment failed'}}
         with contextlib.redirect_stdout(io.StringIO()),patch.object(evaluate,'score_case',return_value=partial),patch.object(evaluate,'_configure_runtime',return_value=[]):
             code=evaluate.main(['--dataset-root',str(self.dataset),'--generation-manifest',str(run/'generation_manifest.json'),
-                '--ids','a','--output',str(run/'pixel_scores.json')])
+                '--ids','a','--output',str(run/'pixel_scores.json'),'--no-resume'])
         self.assertEqual(code,1)
         report,code=formal_report.evaluate_run(run,self.dataset)
         self.assertEqual(code,1);self.assertTrue(report['pixel_inputs_valid']);self.assertFalse(report['complete'])
