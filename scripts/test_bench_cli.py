@@ -153,6 +153,27 @@ class BenchCLITests(unittest.TestCase):
         self.assertEqual(len(self.calls),1)
         self.assertEqual(len(self.calls[0][self.calls[0].index('--ids')+1].split(',')),400)
 
+    def test_judge_workers_and_progress_options_reach_local_native_and_slurm_commands(self):
+        self.make_protocols()
+        args=['evaluate','--runs-root',str(self.experiment),'--dry-run','--workers','10','--no-progress']
+        with patch.object(bench,'run_command',side_effect=self.local):
+            self.assertEqual(self.invoke(*args),0)
+        judges=[c for c in self.calls if Path(c[1]).name=='mllm_evaluate.py']
+        for command in judges:
+            self.assertEqual(command[command.index('--workers')+1],'10');self.assertIn('--no-progress',command)
+        with patch.object(bench.subprocess,'run',side_effect=self.scheduler):
+            self.assertEqual(self.invoke(*args,'--submit'),0)
+        jobs=json.loads((self.experiment/'jobs.json').read_text())
+        for model in self.models:
+            text=Path(jobs['entries']['judge:'+model]['script']).read_text()
+            self.assertIn('--workers 10',text);self.assertIn('--no-progress',text)
+        predictions=self.root/'predictions';predictions.mkdir();self.calls=[]
+        with patch.object(bench,'run_command',side_effect=self.local):
+            self.assertEqual(self.invoke('evaluate','--predictions',str(predictions),'--dataset-root',str(self.dataset),
+                '--output-dir',str(self.root/'scores'),'--dry-run','--workers','10'),0)
+        command=self.calls[-1]
+        self.assertEqual(command[command.index('--workers')+1],'10')
+
     def test_missing_formal_credentials_fail_before_any_process_or_jobs(self):
         with patch.dict(os.environ,{},clear=True),patch.object(bench.subprocess,'run',side_effect=AssertionError('A job/API process started')):
             code=self.invoke('evaluate','--runs-root',str(self.experiment),'--submit')

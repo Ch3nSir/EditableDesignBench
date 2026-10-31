@@ -78,6 +78,8 @@ python scripts/bench.py evaluate --predictions predictions/MyModel --device cuda
 
 分数保存在 `results/MyModel/`。只测部分图片时添加 `--ids 000_delete,000_insert`，默认评测全部 400 例。
 
+MLLM 默认 **5 并发**，终端自动显示进度、case 数、失败数和缓存复用数；添加 `--workers 10` 可改为 10 并发。
+
 两种评分命令都可以添加 `--pixel-only` 跳过 API；像素评分没有 GPU 时，将 `--device cuda` 改为 `--device cpu`。
 
 像素指标为 **MSE、PSNR、SSIM、LPIPS**，沿用 TextEditBench 的实现。MLLM 按 **IF、TA、VC、LP** 四个维度分别评分，每个任务四次独立请求；一个模型的完整 400 例共 1,600 次请求，不含重试。默认输入原图、结果图和指令，不提供目标图，不计算 SE。

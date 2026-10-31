@@ -43,6 +43,19 @@ python scripts/bench.py compare --runs-root outputs/custom_smoke --models all
 
 默认沿用 TextEditBench 的 `temperature=0`、`max_tokens=500`，GPT-6-Luna 也使用这组参数。四个维度分别独立请求。
 
+每个评测进程默认并发处理 5 个 case，每个 case 内的维度依次请求，同时进行的 API 请求不超过 5 个。用 `--workers 10` 改为 10 并发，`--workers 1` 使用串行。`bench.py evaluate` 和 `mllm_evaluate.py` 都支持此参数。
+
+终端进度条显示已处理维度数、case 数、失败数、缓存命中数、API 请求次数、用时和预计剩余时间；`--no-progress` 可关闭显示。成功响应逐条保存，改变并发数不会使已匹配的缓存失效。中断后会保存已返回的请求结果，再释放输出锁。
+
+只运行 MLLM 评分时，例如：
+
+```bash
+python scripts/mllm_evaluate.py \
+  --generation-manifest outputs/run1/flux3-klein/generation_manifest.json \
+  --output outputs/run1/flux3-klein/mllm_scores.json \
+  --workers 10 --require-scoring
+```
+
 如需配置 API 地址、凭据来源、超时或重试次数，可以创建自己的 JSON，通过 `evaluate --config path/to/judge.json` 传入。字段示例见 [judge.example.json](../config/judge.example.json)，其中 `request_profile=texteditbench` 固定使用上述参数。
 
 `reasoning_chat` 保留为显式可选的兼容配置，只有在 JSON 中指定时才启用。比较模型时应使用同一个评委和请求参数。

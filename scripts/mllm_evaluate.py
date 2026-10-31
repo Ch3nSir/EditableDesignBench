@@ -11,6 +11,8 @@ from settings import DATASET_ROOT, MODEL_ROOT
 import argparse
 import base64
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from copy import deepcopy
 import fcntl
 import hashlib
 import io
@@ -21,6 +23,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+from threading import Event, Lock
 import time
 from typing import Callable
 import urllib.error
@@ -29,6 +32,7 @@ import urllib.request
 
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 PROMPT_FILE = Path(__file__).with_name('mllm_prompts.json')
@@ -404,6 +408,9 @@ def evaluate(args, transport: Callable = post_json, sleeper: Callable = time.sle
 
 
 def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict,int]:
+    workers=getattr(args,'workers',5)
+    if type(workers) is not int or not 1<=workers<=32:
+        raise JudgeError('--workers must be an integer in [1,32]')
     tasks=load_tasks(args.tasks or args.dataset/'tasks.jsonl',args.ids)
     prompt_data=json.loads(PROMPT_FILE.read_text())
     prompt_item=prompt_data['modes'][args.mode]
@@ -444,46 +451,109 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
                        'cache_file':str(cache_path(args.output)),
                        'cache_scope':'Validated paid scores for all historical IDs and input/judge fingerprints; excluded from this report denominator'}}
     positions={r['id']:i for i,r in enumerate(report['results'])}
+    state_lock=Lock();stop=Event()
+    counts={'done':0,'failed':0,'cached':0,'cases':0}
+    total_dimensions=sum(len(STANDARD_DIMENSIONS)+(isinstance(task.get('knowledge_prompt'),str)
+                         and bool(task['knowledge_prompt'].strip())) for task in tasks)
+    report['execution']={'workers':workers,'concurrency_unit':'case','maximum_simultaneous_api_requests':workers}
     def counted_transport(*values):
-        report['api_calls_made']+=1
+        with state_lock:
+            if stop.is_set():raise JudgeError('Evaluation interrupted')
+            report['api_calls_made']+=1
         return transport(*values)
     def checkpoint():
+        # Caller holds state_lock: response mutation, cache writes and report
+        # writes are serialized. Network requests and retry waits are outside it.
         # Persist the paid response before its report checkpoint. A subsequent
         # report I/O failure or interruption can then resume without re-paying.
         merge_cached_scores(old,report['results'])
         write_json(cache_path(args.output),{'schema_version':CACHE_SCHEMA_VERSION,'records':list(old.values())})
         report['summary']=summarize(report['results']);write_json(args.output,report)
-    checkpoint()
-    for task in tasks:
+    def safe_error(exc):
+        text=str(exc) if isinstance(exc,(JudgeError,FileNotFoundError,ValueError)) else type(exc).__name__
+        return text.replace(credentials['api_key'],'[REDACTED]') if credentials['api_key'] else text
+
+    def failed_case(task,exc):
+        with state_lock:
+            existing=report['results'][positions[task['id']]]
+            existing.update(status='error',error=safe_error(exc))
+            for value in existing['dimensions'].values():
+                if value['status']=='not_scored':
+                    value.update(status='error',error=safe_error(exc))
+                    counts['done']+=1;counts['failed']+=1
+            counts['cases']+=1
+            checkpoint()
+
+    def evaluate_case(task):
+        if stop.is_set():return
         try:
             case,urls=prepare_case(task,args,manifest,protocol)
-            previous=old.get((case['id'],case['fingerprint']),{}) if args.resume else {}
+        except Exception as exc:
+            failed_case(task,exc);return
+        with state_lock:
+            previous=deepcopy(old.get((case['id'],case['fingerprint']),{})) if args.resume else {}
             if previous.get('fingerprint')==case['fingerprint']:
                 for d,v in case['dimensions'].items():
                     cached=previous.get('dimensions',{}).get(d,{})
                     if cached.get('status')=='scored':
                         parse_score(json.dumps({d:cached.get('score'),'rationale':cached.get('rationale')}),d)
                         case['dimensions'][d]=cached
+                        counts['done']+=1;counts['cached']+=1
             report['results'][positions[case['id']]]=case
-            for dimension,value in case['dimensions'].items():
-                if value['status'] in {'not_applicable','scored'}:continue
-                if pending_reason:
+            checkpoint()
+        for dimension,value in case['dimensions'].items():
+            if stop.is_set():break
+            if value['status'] in {'not_applicable','scored'}:continue
+            if pending_reason:
+                with state_lock:
                     value['reason']=pending_reason
-                else:
+                    counts['done']+=1;checkpoint()
+            else:
+                try:
                     messages=build_messages(dimension,prompts[dimension],task,urls['source'],urls['prediction'],urls['reference'])
-                    case['dimensions'][dimension]=request_score(dimension,messages,credentials,counted_transport,sleeper)
-                checkpoint()
+                    result=request_score(dimension,messages,credentials,counted_transport,sleeper)
+                except Exception as exc:
+                    failed_case(task,exc);return
+                with state_lock:
+                    case['dimensions'][dimension]=result
+                    counts['done']+=1;counts['failed']+=result['status']=='error'
+                    # Persist each paid response before this case's next call.
+                    checkpoint()
+        with state_lock:
             applicable=[v['status'] for v in case['dimensions'].values() if v['status']!='not_applicable']
             case['status']='scored' if all(s=='scored' for s in applicable) else 'partial_error' if 'error' in applicable else 'not_scored'
-        except Exception as exc:
-            # Do not expose credential/provider text through broad exceptions.
-            safe=str(exc) if isinstance(exc,(JudgeError,FileNotFoundError,ValueError)) else type(exc).__name__
-            if credentials['api_key']:safe=safe.replace(credentials['api_key'],'[REDACTED]')
-            existing=report['results'][positions[task['id']]]
-            existing.update(status='error',error=safe)
-            for value in existing['dimensions'].values():
-                if value['status']=='not_scored':value.update(status='error',error=safe)
-        checkpoint()
+            if not stop.is_set():counts['cases']+=1
+            checkpoint()
+
+    with state_lock:checkpoint()
+    bar=tqdm(total=total_dimensions,desc=f'MLLM judge ({workers} workers)',unit='dim',
+             dynamic_ncols=True,disable=not getattr(args,'progress',True),file=sys.stderr)
+    def refresh_progress():
+        with state_lock:
+            bar.set_postfix(cases=f'{counts["cases"]}/{len(tasks)}',failed=counts['failed'],
+                            cached=counts['cached'],api_calls=report['api_calls_made'],refresh=False)
+            bar.update(counts['done']-bar.n)
+        bar.refresh()
+    pool=ThreadPoolExecutor(max_workers=workers,thread_name_prefix='mllm-judge')
+    def guarded_case(task):
+        try:evaluate_case(task)
+        except BaseException:
+            stop.set();raise
+    futures=set()
+    try:
+        futures={pool.submit(guarded_case,task) for task in tasks}
+        last_refresh=0
+        while futures:
+            done,futures=wait(futures,timeout=1,return_when=FIRST_COMPLETED)
+            for future in done:future.result()
+            if done or time.monotonic()-last_refresh>=1:
+                refresh_progress();last_refresh=time.monotonic()
+    finally:
+        # Stop scheduling calls after interruption; in-flight responses finish
+        # and are checkpointed before releasing the output lock.
+        stop.set()
+        pool.shutdown(wait=True,cancel_futures=True)
+        refresh_progress();bar.close()
     errors=report['summary']['errors'];pending=report['summary']['pending']
     report['status']='error' if errors else 'not_scored' if pending else 'scored'
     checkpoint()
@@ -504,6 +574,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument('--base-url');p.add_argument('--model');p.add_argument('--api-key-env')
     p.add_argument('--timeout',type=float,default=120)
     p.add_argument('--max-retries',type=int,default=2)
+    p.add_argument('--workers',type=int,default=5,help='Concurrent cases / maximum simultaneous API requests (1-32; default 5)')
+    p.add_argument('--progress',action=argparse.BooleanOptionalAction,default=True,help='Show live terminal progress (default enabled)')
     p.add_argument('--dry-run',action='store_true',help='Validate inputs and record not_scored; never send API requests')
     p.add_argument('--require-scoring',action='store_true',help='Exit2 when API/model missing or scoring intentionally pending')
     p.add_argument('--no-resume',action='store_false',dest='resume',help='Do not reuse matching completed dimension scores')

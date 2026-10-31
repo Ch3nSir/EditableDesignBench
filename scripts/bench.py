@@ -282,6 +282,8 @@ def evaluation_commands(args,run,dataset,expected):
                   '--ids',','.join(load_tasks(dataset)) if expected=='all' else expected,
                   '--output',str(run/('mllm_pending.json' if args.dry_run else 'mllm_scores.json'))]
     if args.config is not None:judge.extend(['--config',str(args.config)])
+    judge.extend(['--workers',str(getattr(args,'workers',5))])
+    if not getattr(args,'progress',True):judge.append('--no-progress')
     judge.append('--dry-run' if args.dry_run else '--require-scoring')
     formal=common+[str(SCRIPTS/'formal_report.py'),'--run-dir',str(run),'--dataset-root',str(dataset),'--expected-ids',expected]
     if args.pixel_only:formal.append('--pixel-only')
@@ -322,6 +324,8 @@ def _stage_command(args,root,dataset,model,stage):
     command=[args.python,str(SCRIPTS/'bench.py'),'evaluate','--runs-root',str(root),'--dataset-root',str(dataset),
              '--models',model,'--stage',stage,'--no-compare','--device','cuda' if stage=='pixel' else 'cpu']
     if args.config is not None:command.extend(['--config',str(args.config)])
+    command.extend(['--workers',str(getattr(args,'workers',5))])
+    if not getattr(args,'progress',True):command.append('--no-progress')
     if args.pixel_only:command.append('--pixel-only')
     elif args.dry_run:command.append('--dry-run')
     return command
@@ -345,6 +349,8 @@ def evaluate_predictions(args):
            '--predictions',str(predictions),'--ids',ids,
            '--output',str(output/('mllm_pending.json' if args.dry_run else 'mllm_scores.json'))]
     if args.config is not None:judge.extend(['--config',str(args.config)])
+    judge.extend(['--workers',str(getattr(args,'workers',5))])
+    if not getattr(args,'progress',True):judge.append('--no-progress')
     judge.append('--dry-run' if args.dry_run else '--require-scoring')
     with experiment_lock(output):
         stages={'pixel':run_command(pixel)}
@@ -357,6 +363,7 @@ def evaluate_predictions(args):
 
 
 def evaluate(args):
+    if not 1<=args.workers<=32:raise ValueError('--workers must be in [1,32]')
     if not args.pixel_only and not args.dry_run and args.stage!='pixel':judge_ready(args.config)
     if args.predictions is not None:return evaluate_predictions(args)
     if args.ids is not None:raise ValueError('--ids is for --predictions; generated runs already record their case selection')
@@ -422,6 +429,8 @@ def parser():
     eval_p.add_argument('--ids',help='Comma-separated subset for --predictions; default all dataset cases')
     eval_p.add_argument('--dataset-root',type=Path)
     eval_p.add_argument('--models',default='all');eval_p.add_argument('--config',type=Path)
+    eval_p.add_argument('--workers',type=int,default=5,help='Concurrent judge cases / maximum simultaneous API requests (1-32; default 5)')
+    eval_p.add_argument('--progress',action=argparse.BooleanOptionalAction,default=True,help='Show judge progress (default enabled)')
     modes=eval_p.add_mutually_exclusive_group();modes.add_argument('--pixel-only',action='store_true');modes.add_argument('--dry-run',action='store_true')
     eval_p.add_argument('--device',choices=('cpu','cuda'),default='cpu');eval_p.add_argument('--submit',action='store_true')
     eval_p.add_argument('--partition',default='gpu');eval_p.add_argument('--gpu-constraint')

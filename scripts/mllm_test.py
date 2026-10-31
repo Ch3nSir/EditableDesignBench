@@ -125,7 +125,8 @@ class AdapterTests(unittest.TestCase):
 
     def args(self,*extra):
         return m.parser().parse_args(['--dataset',str(self.root),'--predictions',str(self.root/'predictions'),
-            '--output',str(self.root/'scores.json'),'--config',str(self.config),*extra])
+            '--output',str(self.root/'scores.json'),'--config',str(self.config),
+            '--workers','1','--no-progress',*extra])
 
     @staticmethod
     def success(endpoint,key,payload,timeout):
