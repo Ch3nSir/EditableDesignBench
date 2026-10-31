@@ -62,10 +62,10 @@ python scripts/bench.py generate --models flux3-klein --all --output-root output
 
 ## 5. 评分
 
-评测上一步生成的所有模型，并自动汇总：
+使用 10 并发评测上一步生成的所有模型，并自动汇总：
 
 ```bash
-python scripts/bench.py evaluate --runs-root outputs/run1 --device cuda
+python scripts/bench.py evaluate --runs-root outputs/run1 --workers 10 --device cuda
 ```
 
 无需再次指定模型或任务。各模型的像素分数、MLLM 分数和图片预览在 `outputs/run1/<模型ID>/`，对比表在 `outputs/run1/reports/comparison.csv`。
@@ -73,12 +73,12 @@ python scripts/bench.py evaluate --runs-root outputs/run1 --device cuda
 若已有自己生成的图片，将其保存为与原图同尺寸的 RGB PNG，以任务 ID 命名，例如 `predictions/MyModel/000_delete.png`。一条命令完成评分：
 
 ```bash
-python scripts/bench.py evaluate --predictions predictions/MyModel --device cuda
+python scripts/bench.py evaluate --predictions predictions/MyModel --workers 10 --device cuda
 ```
 
 分数保存在 `results/MyModel/`。只测部分图片时添加 `--ids 000_delete,000_insert`，默认评测全部 400 例。
 
-MLLM 默认 **5 并发**，终端自动显示进度、case 数、失败数和缓存复用数；添加 `--workers 10` 可改为 10 并发。
+`--workers` 控制每个评测进程并发处理的 case 数；不指定时默认 **5**，以上示例使用 **10**。终端自动显示维度进度、完成 case 数、失败数、缓存命中数、用时和预计剩余时间；添加 `--no-progress` 可关闭显示。
 
 两种评分命令都可以添加 `--pixel-only` 跳过 API；像素评分没有 GPU 时，将 `--device cuda` 改为 `--device cpu`。
 
