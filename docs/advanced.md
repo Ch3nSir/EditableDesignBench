@@ -24,13 +24,11 @@ python scripts/bench.py evaluate --runs-root outputs/run1 --models sensenova-u1.
 
 ### Fibo Edit Turbo 和 JoyAI Plus
 
-这两个模型使用独立的 Transformers 4.57.6 生成环境，评分使用原来的 benchmark 环境：
+这两个模型使用 README 安装的同一套环境，无需另外创建环境或降级 Transformers：
 
 ```bash
-python -m venv --system-site-packages .venvs/fibo_joy
-.venvs/fibo_joy/bin/python -m pip install transformers==4.57.6
 python scripts/bench.py download --models fibo2-edit-turbo,joyai-image-edit-plus
-python scripts/bench.py generate --models fibo2-edit-turbo,joyai-image-edit-plus --all --output-root outputs/run1 --python .venvs/fibo_joy/bin/python
+python scripts/bench.py generate --models fibo2-edit-turbo,joyai-image-edit-plus --all --output-root outputs/run1
 python scripts/bench.py evaluate --runs-root outputs/run1 --models fibo2-edit-turbo,joyai-image-edit-plus --workers 2 --device cpu
 ```
 
