@@ -17,6 +17,25 @@ RESOLUTION_PROTOCOL='native-pad32-v1'
 DEFAULT_MODELS=('flux3-klein','qwen-image21','qwen-image21-turbo')
 
 MODEL_CONFIGS={
+    'fibo2-edit-turbo':{
+        'repo_id':'briaai/Fibo-2.0-edit-turbo','local_dir':str(MODEL_ROOT/'Fibo-2.0-edit-turbo'),
+        'backend':'diffusion-pipeline','pipeline':'BriaFibo2Pipeline','pipeline_source':'bria_fibo2/pipeline_bria_fibo2.py',
+        'required_components':['text_encoder','processor','scheduler','transformer','vae'],
+        'num_inference_steps':4,'padding_multiple':32,'cpu_offload':False,
+        'call_kwargs':{'guidance_scale':1.0},
+        'conditioning_policy':'Official four-step no-guidance Diffusers direct editing; one original source and instruction; no optional VGL/Gemini rewrite or mask; explicit native output.',
+    },
+    'joyai-image-edit-plus':{
+        'repo_id':'jdopensource/JoyAI-Image-Edit-Plus-Diffusers',
+        'local_dir':str(MODEL_ROOT/'JoyAI-Image-Edit-Plus-Diffusers'),
+        'backend':'diffusion-pipeline','pipeline':'JoyImageEditPlusPipeline',
+        'pipeline_source':'joyimage/pipeline_joyimage_edit_plus.py',
+        'image_argument':'images','vae_scale_factor_attribute':'vae_scale_factor_spatial',
+        'required_components':['text_encoder','tokenizer','processor','scheduler','transformer','vae'],
+        'num_inference_steps':30,'padding_multiple':32,'cpu_offload':False,
+        'call_kwargs':{'guidance_scale':4.0,'negative_prompt':'low quality, blurry, deformed'},
+        'conditioning_policy':'Official Plus model at 30 steps and CFG4; images receives exactly one original source; original instruction and explicit native output dimensions. Official internal reference bucketing retained; no prompt rewrite, masks or extra references.',
+    },
     'sensenova-u1.5-8b-mot':{
         'repo_id':'sensenova/SenseNova-U1.5-8B-MoT',
         'local_dir':str(MODEL_ROOT/'SenseNova-U1.5-8B-MoT'),
@@ -246,7 +265,7 @@ def validate_pipeline_signature(config):
     function=next((node for node in cls.body if isinstance(node,ast.FunctionDef) and node.name=='__call__'),None) if cls else None
     if function is None:raise ValueError('Cannot verify pipeline call signature')
     accepted={a.arg for a in (*function.args.args,*function.args.kwonlyargs)}
-    requested={'prompt','image','width','height','num_inference_steps','generator',*config['call_kwargs']}
+    requested={'prompt',config.get('image_argument','image'),'width','height','num_inference_steps','generator',*config['call_kwargs']}
     if not requested<=accepted:raise ValueError('Installed pipeline does not accept: '+', '.join(sorted(requested-accepted)))
     if config.get('checkpoint_sample_sigmas'):
         if 'sample_sigmas' not in path.read_text():raise ValueError('Installed Qwen21 pipeline lacks checkpoint sample_sigmas support')
@@ -255,7 +274,8 @@ def validate_pipeline_signature(config):
 
 def inference_kwargs(config,*,instruction,image,width,height,generator):
     """Model-specific calls, with a single source image rather than a batch."""
-    return {'prompt':instruction,'image':image,'width':width,'height':height,
+    image_argument=config.get('image_argument','image')
+    return {'prompt':instruction,image_argument:[image] if image_argument=='images' else image,'width':width,'height':height,
             'num_inference_steps':config['num_inference_steps'],'generator':generator,
             **deepcopy(config['call_kwargs'])}
 

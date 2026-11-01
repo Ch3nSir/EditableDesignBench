@@ -56,8 +56,12 @@ python scripts/bench.py generate --models flux3-klein --all --output-root output
 | `flux2-klein-9b` | [FLUX.2 Klein 9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) |
 | `flux2-dev` | [FLUX.2 Dev](https://huggingface.co/black-forest-labs/FLUX.2-dev) |
 | `sensenova-u1.5-8b-mot` | [SenseNova-U1.5-8B-MoT](https://huggingface.co/sensenova/SenseNova-U1.5-8B-MoT) |
+| `fibo2-edit-turbo` | [Fibo 2.0 Edit Turbo](https://huggingface.co/briaai/Fibo-2.0-edit-turbo) |
+| `joyai-image-edit-plus` | [JoyAI-Image-Edit-Plus](https://huggingface.co/jdopensource/JoyAI-Image-Edit-Plus-Diffusers) |
 
 前三种已做真实 GPU 测试，Qwen-Image-Edit-2511 和两种 FLUX.2 已实现适配，尚未完成真实 GPU 生成验证。SenseNova 的额外安装见[进阶用法](docs/advanced.md#sensenova)。权重存放在 `models/`；如下载提示需要授权，在模型页面接受许可后运行 `hf auth login`。
+
+Fibo Edit Turbo 和 JoyAI Plus 的独立生成环境见[进阶用法](docs/advanced.md#fibo-edit-turbo-和-joyai-plus)；两者的真实 GPU 验证状态会在完成后更新。
 
 模型原始输出完整保留。RGBA 输出直接提取原始 RGB 三通道供评测，不叠加背景；Alpha 仅记录统计，不影响评测资格。
 

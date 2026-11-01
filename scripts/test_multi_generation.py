@@ -113,7 +113,10 @@ class MultiGenerationTests(unittest.TestCase):
             kwargs=inference_kwargs(config,instruction="Delete 'a'.",image=image,
                                     width=64,height=64,generator='fixture')
             self.assertEqual(set(kwargs),set(accepted))
-            self.assertIs(kwargs['image'],image)
+            argument=config.get('image_argument','image')
+            if argument=='images':
+                self.assertEqual(len(kwargs[argument]),1);self.assertIs(kwargs[argument][0],image)
+            else:self.assertIs(kwargs[argument],image)
             if model_id.startswith('qwen-image21'):
                 self.assertTrue(kwargs['use_kv_cache']);self.assertEqual(kwargs['output_resolution'],2048)
                 self.assertEqual(kwargs['true_cfg_scale'],1)
@@ -233,6 +236,27 @@ class MultiGenerationTests(unittest.TestCase):
         for row in rows:
             self.assertEqual(row['image_grid_factor'],32)
             self.assertIsNone(row['vae_scale_factor']);self.assertIsNone(row['packed_latent_multiple'])
+
+    def test_plus_images_interface_and_spatial_vae_scale_preserve_single_source(self):
+        args,protocol,plan=self.prepared();config=get_model_config('joyai-image-edit-plus')
+        calls=[]
+        class PlusPipeline:
+            vae_scale_factor_spatial=8
+            def __call__(self,**kwargs):
+                calls.append(kwargs)
+                self_image=kwargs['images']
+                if len(self_image)!=1:raise AssertionError('Extra reference images supplied')
+                return SimpleNamespace(images=[self_image[0].copy()])
+        with contextlib.redirect_stdout(io.StringIO()):
+            code=runner.run_generation(args,config,protocol,self.tasks,plan,{},self.torch,
+                pipeline_factory=lambda *a:PlusPipeline())
+        self.assertEqual(code,0);self.assertEqual(len(calls),len(self.tasks))
+        records=json.loads((self.output/'generation_manifest.json').read_text())['records']
+        for task,call,row in zip(self.tasks,calls,records):
+            self.assertEqual(call['prompt'],task['instruction']);self.assertEqual(call['images'][0].size,(64,64))
+            self.assertNotIn('image',call);self.assertEqual(row['vae_scale_factor'],8)
+            pixels,_=runner.load_prediction(task,self.dataset,record=row,manifest_path=self.output/'generation_manifest.json')
+            with Image.open(self.dataset/task['image']) as source:np.testing.assert_array_equal(pixels,np.asarray(source))
 
     def test_valid_resume_skips_loading_and_corrupt_case_repairs_only_it(self):
         args,protocol,plan=self.prepared();_,manifest,_=self.generate(args,protocol,plan)

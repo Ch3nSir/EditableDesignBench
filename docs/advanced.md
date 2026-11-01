@@ -22,6 +22,22 @@ python scripts/bench.py evaluate --runs-root outputs/run1 --models sensenova-u1.
 
 原生接口为 `it2i_generate`，使用官方 50 步、文本 CFG 4、图像 CFG 1、timestep shift 3、seed 42 和 SDPA。只输入当前原图及原始指令，不启用可选 Edit PE 或 think mode。输出尺寸显式设为原图补边后的尺寸；输入图保留原始像素，模型内部仍执行官方视觉编码预处理。输出张量按官方示例转换为 RGB PNG 并完整保留。当前适配需要模型完整驻留 GPU，不支持 `--cpu-offload`。
 
+### Fibo Edit Turbo 和 JoyAI Plus
+
+这两个模型使用独立的 Transformers 4.57.6 生成环境，评分使用原来的 benchmark 环境：
+
+```bash
+python -m venv --system-site-packages .venvs/fibo_joy
+.venvs/fibo_joy/bin/python -m pip install transformers==4.57.6
+python scripts/bench.py download --models fibo2-edit-turbo,joyai-image-edit-plus
+python scripts/bench.py generate --models fibo2-edit-turbo,joyai-image-edit-plus --all --output-root outputs/run1 --python .venvs/fibo_joy/bin/python
+python scripts/bench.py evaluate --runs-root outputs/run1 --models fibo2-edit-turbo,joyai-image-edit-plus --workers 2 --device cpu
+```
+
+Fibo Edit Turbo 使用官方四步、CFG 1 的直接指令编辑接口，不启用可选的 VGL/Gemini 提示词转换，也不输入 mask。JoyAI Plus 使用官方 30 步、CFG 4，`images` 列表只放当前 case 的一张原图；保留官方内部参考图预处理，显式指定原图补边后的输出尺寸。两者均保存完整原始输出，评委仍读取原始编辑指令。
+
+Fibo 权重需要先在 Hugging Face 模型页面接受访问条件。
+
 ### 接入新的 Diffusers 模型
 
 内置模型不需要配置文件。接入新模型时，将自己的配置保存为 `config/models.json`；字段示例见 [models.example.json](../config/models.example.json)。

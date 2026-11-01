@@ -186,7 +186,7 @@ def run_generation(args,config,protocol,tasks,plan,records,torch,*,pipeline_fact
     try:
         pipe=pipeline_factory(config,args.model_path,torch,args.device,args.cpu_offload)
         native=config.get('backend')=='sensenova-native'
-        vae_factor=None if native else int(pipe.vae_scale_factor)
+        vae_factor=None if native else int(getattr(pipe,config.get('vae_scale_factor_attribute','vae_scale_factor')))
         grid=int(pipe.image_grid_factor) if native else 2*vae_factor
         if grid<=0 or 32%grid:
             raise ValueError(f'Checkpoint requires an output multiple incompatible with pad32: {grid}')
