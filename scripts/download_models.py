@@ -1,4 +1,4 @@
-"""Download pinned Diffusers checkpoints using the existing Hugging Face login.
+"""Download pinned editing checkpoints using the existing Hugging Face login.
 
 No credentials are accepted on the command line or written to progress files.
 The downloader omits duplicate root single-file weights when component folders
@@ -74,7 +74,7 @@ def select_diffusers_files(info,config):
     if backend=='flux3-modular-local-pup':
         components={'text_encoder','transformer','vae'}
         root_files={'modular_model_index.json','config.json','manifest.json','README.md','LICENSE.md','NOTICE.md'}
-    elif backend=='transformers-pup':
+    elif backend in ('transformers-pup','sensenova-native'):
         components=set();root_files=None
     files=[]
     for sibling in info.siblings:
@@ -89,6 +89,7 @@ def select_diffusers_files(info,config):
                           'lfs_sha256':getattr(lfs,'sha256',None) if lfs is not None else None})
     names={item['path'] for item in files}
     required={'model_index.json'} if backend=='diffusion-pipeline' else {'modular_model_index.json'} if backend=='flux3-modular-local-pup' else {'config.json','model.safetensors','system_prompts.json'}
+    if backend=='sensenova-native':required={'config.json','model.safetensors.index.json','tokenizer_config.json','vocab.json','merges.txt'}
     if not required.issubset(names):raise ValueError('Repository is missing its required model/processor metadata')
     for component in components:
         if not any(name.startswith(component+'/') for name in names):
@@ -182,11 +183,11 @@ def download_one(model_id,output_root,status_root,*,api,token,metadata_only=Fals
                 raise ValueError('Repository metadata did not resolve an immutable commit SHA')
             files=select_diffusers_files(info,config)
             state.update(revision=info.sha,gated=info.gated,files=files,
-                         duplicate_root_weight_files_excluded=config.get('backend','diffusion-pipeline')!='transformers-pup')
+                         duplicate_root_weight_files_excluded=config.get('backend','diffusion-pipeline') not in ('transformers-pup','sensenova-native'))
             state['phase']='access_check'
             backend=config.get('backend','diffusion-pipeline')
             metadata_name=('modular_model_index.json' if backend=='flux3-modular-local-pup'
-                           else 'config.json' if backend=='transformers-pup' else 'model_index.json')
+                           else 'config.json' if backend in ('transformers-pup','sensenova-native') else 'model_index.json')
             if head is not None:head(config['repo_id'],metadata_name,info.sha,token)
             existing=local_progress(folder,files)
             save(status='ready' if metadata_only else 'downloading',phase='metadata_complete' if metadata_only else 'download',progress=existing)

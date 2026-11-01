@@ -98,6 +98,10 @@ class MultiGenerationTests(unittest.TestCase):
         image=Image.new('RGB',(64,64),'white')
         for model_id in MODEL_CONFIGS:
             config=get_model_config(model_id)
+            if config.get('backend')=='sensenova-native':
+                # Optional native-package interface has dedicated source and
+                # call-contract tests, independent of the core Diffusers env.
+                continue
             if model_id=='flux3-klein':
                 try:accepted=validate_pipeline_signature(config)
                 except ValueError as exc:
@@ -214,6 +218,21 @@ class MultiGenerationTests(unittest.TestCase):
             self.assertEqual(row['packed_latent_multiple'],16)
             input_files={p.name for p in Path(row['model_input']).parent.iterdir()}
             self.assertEqual(input_files,{'source.png','task.json','model_input_padded.png'})
+
+    def test_native_pixel_model_uses_real_grid_without_claiming_a_vae(self):
+        args,protocol,plan=self.prepared()
+        config=get_model_config('sensenova-u1.5-8b-mot')
+        class NativePipeline:
+            image_grid_factor=32
+            def __call__(self,**kwargs):return SimpleNamespace(images=[kwargs['image'].copy()])
+        with contextlib.redirect_stdout(io.StringIO()):
+            code=runner.run_generation(args,config,protocol,self.tasks,plan,{},self.torch,
+                pipeline_factory=lambda *a:NativePipeline())
+        self.assertEqual(code,0)
+        rows=json.loads((self.output/'generation_manifest.json').read_text())['records']
+        for row in rows:
+            self.assertEqual(row['image_grid_factor'],32)
+            self.assertIsNone(row['vae_scale_factor']);self.assertIsNone(row['packed_latent_multiple'])
 
     def test_valid_resume_skips_loading_and_corrupt_case_repairs_only_it(self):
         args,protocol,plan=self.prepared();_,manifest,_=self.generate(args,protocol,plan)

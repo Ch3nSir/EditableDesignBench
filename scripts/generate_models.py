@@ -136,6 +136,8 @@ def build_protocol(args,config,tasks,plan,content):
     folder=Path(__file__).resolve().parent
     sources={name:sha256_file(folder/name) for name in
              ('generate_models.py','model_registry.py','output_adapter.py','generation_provenance.py','flux3_adapter.py','settings.py')}
+    if config.get('backend')=='sensenova-native':
+        sources['sensenova_adapter.py']=sha256_file(folder/'sensenova_adapter.py')
     value={'schema_version':2,'generation_protocol_version':GENERATION_PROTOCOL_VERSION,
         'model_id':args.model,'run_id':args.run_id or args.output_dir.name,'repo_id':config['repo_id'],
         'model_path':str(args.model_path),'pipeline':config['pipeline'],'model_config':config,
@@ -183,9 +185,11 @@ def run_generation(args,config,protocol,tasks,plan,records,torch,*,pipeline_fact
     save('loading_model')
     try:
         pipe=pipeline_factory(config,args.model_path,torch,args.device,args.cpu_offload)
-        vae_factor=int(pipe.vae_scale_factor)
-        if vae_factor<=0 or 32%(2*vae_factor):
-            raise ValueError(f'Checkpoint VAE requires an output multiple incompatible with pad32: {2*vae_factor}')
+        native=config.get('backend')=='sensenova-native'
+        vae_factor=None if native else int(pipe.vae_scale_factor)
+        grid=int(pipe.image_grid_factor) if native else 2*vae_factor
+        if grid<=0 or 32%grid:
+            raise ValueError(f'Checkpoint requires an output multiple incompatible with pad32: {grid}')
     except Exception as exc:
         save('failed',error=f'Model loading failed: {type(exc).__name__}: {exc}');raise
     for task,p in zip(tasks,plan):
@@ -198,9 +202,10 @@ def run_generation(args,config,protocol,tasks,plan,records,torch,*,pipeline_fact
         metadata={k:v for k,v in p.items() if k not in ('source_file','instruction')}
         metadata.update(model_id=args.model,run_id=protocol['run_id'],model=str(args.model_path),
             pipeline=config['pipeline'],steps=config['num_inference_steps'],seed=args.seed,
-            vae_scale_factor=vae_factor,packed_latent_multiple=2*vae_factor,
+            vae_scale_factor=vae_factor,packed_latent_multiple=None if native else grid,
             attempt=attempt,protocol_sha256=fingerprint,content_provenance_sha256=content_sha,
             resolution_protocol=RESOLUTION_PROTOCOL,started_at=now(),device=gpu)
+        if native:metadata['image_grid_factor']=grid
         if cid in invalid:metadata['repair_reason']=invalid[cid]
         save('generating',cid);start=time.monotonic()
         print(json.dumps({'id':cid,'model':args.model,'status':'generating','attempt':attempt}),flush=True)
@@ -288,6 +293,9 @@ def main(argv=None):
         if config.get('backend')=='flux3-modular-local-pup':
             from flux3_adapter import collect_flux3_content
             content=collect_flux3_content(args.model_path,config)
+        elif config.get('backend')=='sensenova-native':
+            from sensenova_adapter import collect_sensenova_content
+            content=collect_sensenova_content(args.model_path)
         else:content=collect_generation_content(args.model_path)
         protocol=build_protocol(args,config,tasks,plan,content)
         records=require_directory(args.output_dir,protocol)

@@ -8,6 +8,20 @@
 
 生成可以用 `--cpu-offload` 节省显存；`--preflight` 仅检查权重和调用参数，不加载模型。FLUX 3 的本地官方提示词扩写器随模型下载，不调用评委 API；评分使用原始指令。Turbo 使用权重自带的八步采样日程。
 
+### SenseNova
+
+SenseNova 使用官方原生推理包，需额外安装。已有官方推理环境时，也可以直接使用该环境生成，评分仍在 benchmark 环境执行。
+
+```bash
+git clone https://github.com/OpenSenseNova/SenseNova-U1.git
+pip install --no-deps -e SenseNova-U1
+python scripts/bench.py download --models sensenova-u1.5-8b-mot
+python scripts/bench.py generate --models sensenova-u1.5-8b-mot --all --output-root outputs/run1
+python scripts/bench.py evaluate --runs-root outputs/run1 --models sensenova-u1.5-8b-mot --workers 2 --device cpu
+```
+
+原生接口为 `it2i_generate`，使用官方 50 步、文本 CFG 4、图像 CFG 1、timestep shift 3、seed 42 和 SDPA。只输入当前原图及原始指令，不启用可选 Edit PE 或 think mode。输出尺寸显式设为原图补边后的尺寸；输入图保留原始像素，模型内部仍执行官方视觉编码预处理。输出张量按官方示例转换为 RGB PNG 并完整保留。当前适配需要模型完整驻留 GPU，不支持 `--cpu-offload`。
+
 ### 接入新的 Diffusers 模型
 
 内置模型不需要配置文件。接入新模型时，将自己的配置保存为 `config/models.json`；字段示例见 [models.example.json](../config/models.example.json)。

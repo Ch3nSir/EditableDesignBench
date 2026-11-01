@@ -17,6 +17,16 @@ RESOLUTION_PROTOCOL='native-pad32-v1'
 DEFAULT_MODELS=('flux3-klein','qwen-image21','qwen-image21-turbo')
 
 MODEL_CONFIGS={
+    'sensenova-u1.5-8b-mot':{
+        'repo_id':'sensenova/SenseNova-U1.5-8B-MoT',
+        'local_dir':str(MODEL_ROOT/'SenseNova-U1.5-8B-MoT'),
+        'backend':'sensenova-native','pipeline':'SenseNovaEditingPipeline',
+        'num_inference_steps':50,'padding_multiple':32,
+        'call_kwargs':{'cfg_scale':4.0,'img_cfg_scale':1.0,'cfg_norm':'none',
+                       'timestep_shift':3.0,'cfg_interval':[0.0,1.0]},
+        'cpu_offload':False,'prefer_existing':True,'attn_backend':'sdpa',
+        'conditioning_policy':'Official native it2i_generate; one source and original instruction; explicit pad32 output size, native internal input preprocessing; no external resizing, Edit PE or think mode.',
+    },
     'flux3-klein':{
         'repo_id':'black-forest-labs/flux-3-image-klein',
         'local_dir':str(MODEL_ROOT/'flux-3-image-klein'),
@@ -186,6 +196,9 @@ def _validate_component_checkpoint(folder):
 def validate_model_files(model_path,config):
     """Check local pipeline identity/components before any GPU allocation/load."""
     model_path=Path(model_path)
+    if config.get('backend')=='sensenova-native':
+        from sensenova_adapter import validate_sensenova_files
+        return validate_sensenova_files(model_path,config)
     if config.get('backend')=='flux3-modular-local-pup':
         from flux3_adapter import validate_flux3_files
         return validate_flux3_files(model_path,config)
@@ -217,6 +230,9 @@ def validate_model_files(model_path,config):
 
 def validate_pipeline_signature(config):
     """Check installed call support from source without importing torch."""
+    if config.get('backend')=='sensenova-native':
+        from sensenova_adapter import validate_sensenova_source
+        return validate_sensenova_source()
     spec=find_spec('diffusers')
     locations=list(spec.submodule_search_locations or []) if spec else []
     if len(locations)!=1:raise ValueError('Cannot resolve installed Diffusers source')
@@ -245,6 +261,9 @@ def inference_kwargs(config,*,instruction,image,width,height,generator):
 
 
 def load_pipeline(config,model_path,torch,device,cpu_offload):
+    if config.get('backend')=='sensenova-native':
+        from sensenova_adapter import load_sensenova_pipeline
+        return load_sensenova_pipeline(config,model_path,torch,device,cpu_offload)
     if config.get('backend')=='flux3-modular-local-pup':
         from flux3_adapter import load_flux3_pipeline
         return load_flux3_pipeline(config,model_path,torch,device,cpu_offload)
