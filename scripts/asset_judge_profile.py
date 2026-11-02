@@ -10,6 +10,7 @@ from PIL import Image
 
 INPUT_PROTOCOL = 'asset-edit-single-source-v1'
 VERSION = 'editabledesignbench-asset-mllm-v1'
+MESSAGE_TEMPLATE_REVISION = 'asset-json-number-score-v2'
 DIMENSIONS = ('IF', 'OA', 'VC', 'LP')
 METHODS = {name: 'asset_' + name for name in ('delete', 'insert', 'replace', 'move', 'scale')}
 VIEW_VERSION = 'asset-source-allowed-crop-v1'
@@ -177,6 +178,9 @@ def build_messages(dimension: str, task: dict, urls: list[str]) -> list[dict]:
     for label, url in zip(labels, urls):
         content.extend([{'type': 'text', 'text': label},
                         {'type': 'image_url', 'image_url': {'url': url}}])
-    content.append({'type': 'text', 'text': 'Return only a JSON object: '
-                    + json.dumps({dimension: '<score 0-5>', 'rationale': '<brief visible evidence>'})})
+    content.append({'type': 'text', 'text':
+        f'Return only one valid JSON object with keys "{dimension}" and "rationale". '
+        f'The value of "{dimension}" MUST be a JSON number from 0 to 5, '
+        'never a quoted number, word, or placeholder. The rationale must be a brief text string. '
+        'Do not include Markdown or any text outside the JSON object.'})
     return [{'role': 'system', 'content': PROMPTS[dimension]}, {'role': 'user', 'content': content}]

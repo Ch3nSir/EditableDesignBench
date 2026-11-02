@@ -243,6 +243,7 @@ def current_profile_metadata(tasks: list[dict], mode: str = 'no_reference') -> d
             'prompts_sha256':canonical_hash(asset_profile.PROMPTS),'prompt_source':str(source),
             'prompt_source_sha256':digest(source.read_bytes()),
             'user_message_template':'Original instruction, asset operation, full source/prediction and fixed same-coordinate details',
+            'message_template_revision':asset_profile.MESSAGE_TEMPLATE_REVISION,
             'criteria':list(asset_profile.DIMENSIONS),'score_range':[0,5],
             'temperature':0,'max_tokens_per_criterion':500,
             'separate_request_per_criterion':True,'independent_case_context':True,

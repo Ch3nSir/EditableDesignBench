@@ -68,6 +68,7 @@ class AssetJudgeTests(unittest.TestCase):
         self.assertEqual(code,0);self.assertEqual(len(payloads),20)
         self.assertEqual(judge.infer_profile(self.tasks),'asset')
         self.assertEqual(report['protocol']['criteria'],list(asset.DIMENSIONS))
+        self.assertEqual(report['protocol']['message_template_revision'],asset.MESSAGE_TEMPLATE_REVISION)
         self.assertTrue(judge.validate_report_protocol(report['protocol'],self.tasks))
         self.assertFalse(judge.validate_report_protocol(None,self.tasks))
         self.assertFalse(judge.validate_report_protocol(report['protocol'],[None]))
@@ -80,6 +81,8 @@ class AssetJudgeTests(unittest.TestCase):
             text=json.dumps(payload['messages'])
             self.assertNotIn('secret_edit_model_23',text)
             self.assertNotIn('a_reference_target_that_does_not_exist',text)
+            self.assertIn('MUST be a JSON number',payload['messages'][1]['content'][-1]['text'])
+            self.assertNotIn('"<score 0-5>"',payload['messages'][1]['content'][-1]['text'])
         for row in report['results']:
             self.assertEqual(tuple(row['dimensions']),asset.DIMENSIONS)
             self.assertEqual(row['judge_views']['crop_box'],[58,58,142,142])
@@ -143,6 +146,16 @@ class AssetJudgeTests(unittest.TestCase):
         final,code=judge.evaluate(self.args(),transport=self.success)
         self.assertEqual(code,0);self.assertEqual(final['api_calls_made'],4)
         self.assertEqual(final['summary']['joint_qualification']['rate'],1)
+
+    def test_message_template_revision_isolates_scores_without_erasing_paid_history(self):
+        args=self.args('--ids',self.tasks[0]['id'])
+        first,_=judge.evaluate(args,transport=self.success)
+        with patch.object(asset,'MESSAGE_TEMPLATE_REVISION','previous-template-fixture'):
+            changed,_=judge.evaluate(args,transport=self.success)
+        self.assertEqual(changed['api_calls_made'],4)
+        self.assertNotEqual(first['results'][0]['fingerprint'],changed['results'][0]['fingerprint'])
+        restored,_=judge.evaluate(args,transport=lambda *a:self.fail('Current paid namespace was erased'))
+        self.assertEqual(restored['api_calls_made'],0)
 
     def test_bad_output_is_model_failure_bad_mask_is_evaluation_error(self):
         path=self.predictions/self.tasks[0]['output_filename'];path.write_bytes(b'not an image')
