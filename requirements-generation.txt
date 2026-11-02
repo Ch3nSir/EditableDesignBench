@@ -1,0 +1,10 @@
+# Local image generation; includes the evaluation dependencies.
+-r requirements.txt
+# Keep the bundled upstream build for the FLUX 3 / Qwen 2.1 pipeline APIs.
+./vendor/diffusers-0.42.0.dev0-1d8c1b13-py3-none-any.whl
+transformers>=5.20,<6
+accelerate>=1.15,<2
+safetensors>=0.8,<1
+sentencepiece>=0.2,<0.3
+protobuf>=5,<8
+einops>=0.8,<1

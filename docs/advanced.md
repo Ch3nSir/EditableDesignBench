@@ -2,7 +2,66 @@
 
 常规安装、生成和评分见 [README](../README.md)。以下内容按需使用。
 
+## 环境与依赖
+
+推荐 Linux、Python 3.12，这是本项目已验证的 Python 版本。`environment.yml` 只创建同名 Python / pip 环境，与 README 的 `conda create` 等价，不会安装项目依赖。
+
+- `requirements.txt`：下载数据、评测已有图片。包含像素指标需要的 PyTorch / TorchVision / TorchMetrics，以及 MLLM 的 HTTP、图片和进度工具；无需安装 OpenAI SDK。
+- `requirements-generation.txt`：通过 `-r requirements.txt` 包含基础依赖，额外安装 Diffusers、Transformers、Accelerate 和 tokenizer 依赖。
+- `requirements.lock.txt`：已验证的完整环境快照，包含直接与间接依赖，限定 Linux x86_64、Python 3.12、PyTorch 2.8.0 / CUDA 12.8。需要相同版本时，用它替代前两份清单安装；它不是 constraints 文件。
+
+常规依赖采用版本范围，避免强制覆盖满足要求的环境。范围表示允许解析的版本，尚未逐一验证其中所有组合；精确复现实验请使用锁定文件。生成管线所需的 Diffusers 构建保留固定版本，原因和来源见 [NOTICE](../NOTICE.md)。
+
+### CPU 与 CUDA
+
+基础依赖不强制安装 CUDA 12.8 构建。希望只装 CPU 版时，在安装基础依赖前运行：
+
+```bash
+python -m pip install "torch>=2.8,<3" "torchvision>=0.23,<1" --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -r requirements.txt
+```
+
+本地生成需要 CUDA 版 PyTorch。例如安装 CUDA 12.8 构建：
+
+```bash
+python -m pip install "torch>=2.8,<3" "torchvision>=0.23,<1" --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements-generation.txt
+```
+
+其他 CUDA 版本按 [PyTorch 官方安装指南](https://pytorch.org/get-started/locally/)选择与驱动、GPU 匹配的构建，随后安装生成依赖。可用以下命令检查依赖一致性及当前进程的 GPU 可见性：
+
+```bash
+python -m pip check
+python -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda, 'GPU available:', torch.cuda.is_available())"
+```
+
+生成环境还可运行 `python scripts/bench.py check-env --prepare-metrics`，检查默认模型管线并预下载 LPIPS 感知网络权重；该命令需要完整生成依赖。LPIPS 在 CPU 上也可计算。
+
+还原锁定环境时，在新的 Python 3.12 环境和仓库根目录中运行：
+
+```bash
+python -m pip install -r requirements.lock.txt
+```
+
+### 显存与模型依赖
+
+本地生成在 H200 和 96 GB RTX PRO 6000 Blackwell 上验证过。不同模型、原图尺寸和 offload 设置的占用不同，尚无统一的最低显存承诺。先以 `--sample 1` 试跑；支持 offload 的模型可加 `--cpu-offload`。外部图片评分使用 `--device cpu` 即可，无需本地图像模型或显卡。
+
 ## 模型选择
+
+替换 README 命令中的模型 ID 即可；多个 ID 用逗号分隔。以下模型共用生成依赖，SenseNova 另需安装原生包。
+
+| 模型 ID | 模型 |
+|---|---|
+| `flux3-klein` | [FLUX 3 Image Klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) |
+| `qwen-image21` | [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) |
+| `qwen-image21-turbo` | [Qwen-Image-2.1-Turbo](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo) |
+| `qwen-edit-2511` | [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) |
+| `flux2-klein-9b` | [FLUX.2 Klein 9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) |
+| `flux2-dev` | [FLUX.2 Dev](https://huggingface.co/black-forest-labs/FLUX.2-dev) |
+| `sensenova-u1.5-8b-mot` | [SenseNova-U1.5-8B-MoT](https://huggingface.co/sensenova/SenseNova-U1.5-8B-MoT) |
+| `fibo2-edit-turbo` | [Fibo 2.0 Edit Turbo](https://huggingface.co/briaai/Fibo-2.0-edit-turbo) |
+| `joyai-image-edit-plus` | [JoyAI-Image-Edit-Plus](https://huggingface.co/jdopensource/JoyAI-Image-Edit-Plus-Diffusers) |
 
 `download` 和 `generate` 的 `--models all` 是默认组合 `flux3-klein,qwen-image21,qwen-image21-turbo`。评分和汇总中的 `all` 表示实验目录里记录的全部模型。
 
@@ -24,7 +83,7 @@ python scripts/bench.py evaluate --runs-root outputs/run1 --models sensenova-u1.
 
 ### Fibo Edit Turbo 和 JoyAI Plus
 
-这两个模型使用 README 安装的同一套环境，无需另外创建环境或降级 Transformers：
+这两个模型使用 `requirements-generation.txt` 的同一套生成环境，无需另外创建环境或降级 Transformers：
 
 ```bash
 python scripts/bench.py download --models fibo2-edit-turbo,joyai-image-edit-plus
@@ -69,6 +128,8 @@ python scripts/bench.py compare --runs-root outputs/custom_smoke --models all
 
 ## 文字与资产轨
 
+文字任务来自 200 个原始设计，资产任务来自其中 34 个设计的 40 个资产单元。
+
 下载器同时安装 400 条文字任务（数据根目录）和 200 条资产任务（`assets/`）。生成或评分外部图片时，用 `--track asset` 选择资产；`--dataset-root` 仍支持直接指定任意一条轨道的目录。生成实验会记录轨道与任务名单，后续评分自动读取。两轨使用不同提示词、掩码约定和缓存身份，分别汇报分数。
 
 资产评委接收原图、模型结果、原始指令、操作类型，以及由源图允许区域确定的同坐标局部放大。整图用于检查远处的文字或布局改变；不读取参考目标或生成素材。
@@ -88,7 +149,7 @@ python scripts/bench.py compare --runs-root outputs/custom_smoke --models all
 
 ## API 与请求参数
 
-默认沿用 TextEditBench 的 `temperature=0`、`max_tokens=500`，GPT-6-Luna 也使用这组参数。四个维度分别独立请求。
+默认沿用 TextEditBench 的 `temperature=0`、`max_tokens=500`。四个维度分别独立请求。完整文字集为 1,600 次请求，完整资产集为 800 次，不含重试。
 
 每个评测进程默认并发处理 5 个 case，每个 case 内的维度依次请求，同时进行的 API 请求不超过 5 个。用 `--workers 10` 改为 10 并发，`--workers 1` 使用串行。`bench.py evaluate` 和 `mllm_evaluate.py` 都支持此参数。
 

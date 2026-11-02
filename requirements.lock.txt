@@ -1,4 +1,8 @@
-# Python 3.12; validated isolated benchmark environment.
+# Optional snapshot of the validated full generation/evaluation environment.
+# Linux x86_64, Python 3.12, PyTorch 2.8.0 + CUDA 12.8.
+# Install instead of the ranged requirements when reproducing this exact setup.
+# Normal installation: requirements.txt; local generation: requirements-generation.txt.
+# This is a full environment snapshot, not a pip constraints file.
 # Diffusers: unmodified upstream d8c1b13c756df0059bcdb6e477a1eafcd502098d.
 --extra-index-url https://download.pytorch.org/whl/cu128
 accelerate==1.15.0
