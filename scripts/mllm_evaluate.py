@@ -1,8 +1,10 @@
-"""TextEditBench MLLM criteria adapter; no scoring is invented without an API.
+"""Separate text and asset MLLM profiles; no scoring is invented without an API.
 
 Default: no-reference evaluation, using source + prediction + user instruction.
 The original MIT-licensed IF/TA/VC/LP(/SE) prompts are snapshotted verbatim in
 mllm_prompts.json; reference mode is explicit and separately identified.
+Asset tasks declare their input protocol and use independent IF/OA/VC/LP
+prompts with full images and fixed source-derived detail views, without GT.
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ import urllib.request
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
+import asset_judge_profile as asset_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 PROMPT_FILE = Path(__file__).with_name('mllm_prompts.json')
@@ -46,6 +49,38 @@ CACHE_SCHEMA_VERSION = 1
 
 class JudgeError(Exception):
     """Safe-to-report failure; provider bodies/credentials are never echoed."""
+
+
+class ModelOutputError(JudgeError):
+    """An asset model did not provide a usable output; not an API judge failure."""
+
+
+def is_asset_task(task: dict) -> bool:
+    return isinstance(task,dict) and task.get('input_protocol') == asset_profile.INPUT_PROTOCOL
+
+
+def _task_profile(task: dict) -> str:
+    if not isinstance(task,dict):raise JudgeError('Task entries must be objects')
+    declared = task.get('input_protocol')
+    if is_asset_task(task):return 'asset'
+    if declared is not None and (not isinstance(declared,str) or not declared.startswith('text')):
+        raise JudgeError('Unsupported task input_protocol: ' + str(declared))
+    if declared is None and (task.get('asset_family_id') or str(task.get('id','')).startswith('asset_')):
+        raise JudgeError('Asset tasks must explicitly declare ' + asset_profile.INPUT_PROTOCOL)
+    return 'text'
+
+
+def infer_profile(tasks: list[dict]) -> str:
+    profiles={_task_profile(task) for task in tasks}
+    if len(profiles)!=1:raise JudgeError('Evaluate text and asset tasks separately; mixed judge profiles are not supported')
+    return next(iter(profiles))
+
+
+def dimensions_for_task(task: dict, profile: str | None = None) -> tuple[str,...]:
+    profile=profile or _task_profile(task)
+    if profile=='asset':return asset_profile.DIMENSIONS
+    knowledge=task.get('knowledge_prompt')
+    return (*STANDARD_DIMENSIONS,'SE') if isinstance(knowledge,str) and knowledge.strip() else STANDARD_DIMENSIONS
 
 
 def digest(value: bytes) -> str:
@@ -120,7 +155,10 @@ def merge_cached_scores(cache: dict, records: list[dict]) -> None:
         for dimension,value in dimensions.items():
             if not isinstance(value,dict):raise JudgeError('Invalid cached dimension')
             if value.get('status')!='scored':continue
-            if dimension not in (*STANDARD_DIMENSIONS,'SE'):raise JudgeError('Unknown cached score dimension')
+            profile=record.get('judge_profile','text')
+            if profile not in ('text','asset'):raise JudgeError('Unknown cached judge profile')
+            allowed=asset_profile.DIMENSIONS if profile=='asset' else (*STANDARD_DIMENSIONS,'SE')
+            if dimension not in allowed:raise JudgeError('Unknown cached score dimension')
             parse_score(json.dumps({dimension:value.get('score'),'rationale':value.get('rationale')}),dimension)
             scored[dimension]=dict(value)
         if not scored:continue
@@ -160,7 +198,8 @@ def load_tasks(path: Path, ids: str | None = None) -> list[dict]:
         if not isinstance(t,dict) or not isinstance(t.get('id'),str) or not isinstance(t.get('instruction'),str):
             raise JudgeError('Task entries require string id and instruction')
         if t['id'] in seen:raise JudgeError(f'Duplicate task ID: {t["id"]}')
-        if t.get('operation') not in METHODS:raise JudgeError(f'Unsupported operation: {t["id"]}')
+        methods=asset_profile.METHODS if _task_profile(t)=='asset' else METHODS
+        if t.get('operation') not in methods:raise JudgeError(f'Unsupported operation: {t["id"]}')
         seen.add(t['id'])
     if ids is not None:
         requested=[s.strip() for s in ids.split(',')]
@@ -170,6 +209,7 @@ def load_tasks(path: Path, ids: str | None = None) -> list[dict]:
         if not requested or unknown:raise JudgeError('Unknown/empty --ids: '+','.join(unknown))
         tasks=[t for t in tasks if t['id'] in set(requested)]
     if not tasks:raise JudgeError('No tasks selected')
+    infer_profile(tasks)
     return tasks
 
 
@@ -191,6 +231,73 @@ def request_parameters(config: dict) -> dict:
         if not isinstance(config['store'],bool):raise JudgeError('store must be a boolean')
         parameters['store']=config['store']
     return parameters
+
+
+def current_profile_metadata(tasks: list[dict], mode: str = 'no_reference') -> dict:
+    """Current judge contract without credentials; shared by artifact validators."""
+    if infer_profile(tasks)=='asset':
+        if mode!='no_reference':raise JudgeError('Asset judging does not accept a reference target')
+        source=Path(asset_profile.__file__).resolve()
+        return {'version':asset_profile.VERSION,'profile':'asset','mode':mode,
+            'input_protocol':asset_profile.INPUT_PROTOCOL,
+            'prompts_sha256':canonical_hash(asset_profile.PROMPTS),'prompt_source':str(source),
+            'prompt_source_sha256':digest(source.read_bytes()),
+            'user_message_template':'Original instruction, asset operation, full source/prediction and fixed same-coordinate details',
+            'criteria':list(asset_profile.DIMENSIONS),'score_range':[0,5],
+            'temperature':0,'max_tokens_per_criterion':500,
+            'separate_request_per_criterion':True,'independent_case_context':True,
+            'images':'full source + full prediction ROI + fixed source detail + fixed prediction detail',
+            'image_encoding':'Lossless RGB PNG; native full views and symmetric in-memory detail enlargement; files unchanged',
+            'view_version':asset_profile.VIEW_VERSION,'view_parameters':dict(asset_profile.VIEW_PARAMETERS),
+            'operation_mapping':dict(asset_profile.METHODS),'reference_target_supplied':False,
+            'editing_model_identity_supplied':False,'API_failure_scores':'null; never fabricated zero',
+            'aggregate_means':'Conditional on valid outputs; null until all valid outputs judged, with full-selected coverage',
+            'joint_qualification':{'dimensions':list(asset_profile.DIMENSIONS),'minimum_each':4,
+                                   'denominator':'All selected cases, including model-output failures'},
+            'API_connectivity_validated_by_dry_run':False}
+    data=json.loads(PROMPT_FILE.read_text())
+    if mode not in data['modes']:raise JudgeError('Unsupported text judge mode')
+    source=resolve_prompt_source(data['modes'][mode])
+    # Keep the text contract byte-for-byte equivalent at the canonical JSON
+    # level: existing paid scores must remain reusable after this extension.
+    return {'version':PROTOCOL_VERSION,'mode':mode,
+        'prompts_sha256':digest(PROMPT_FILE.read_bytes()),'prompt_source':str(source),
+        'prompt_source_sha256':data['modes'][mode]['source_sha256'],
+        'user_message_template':'Verbatim official mode-specific text; validated RGB PNG image URLs',
+        'criteria':list(STANDARD_DIMENSIONS),'optional_SE':'Only explicit knowledge_prompt',
+        'score_range':[0,5],'temperature':0,'max_tokens_per_criterion':500,
+        'separate_request_per_criterion':True,'independent_case_context':True,
+        'images':'source + prediction ROI' if mode=='no_reference' else 'source + prediction ROI + reference',
+        'image_encoding':'Lossless RGB PNG; padding removed only from in-memory arrays; files unchanged',
+        'operation_mapping':METHODS,'API_failure_scores':'null; never fabricated zero',
+        'aggregate_means':'null unless every applicable expected case has a scored result',
+        'API_connectivity_validated_by_dry_run':False}
+
+
+def validate_report_protocol(protocol: dict, tasks: list[dict]) -> bool:
+    """Validate profile/prompt/view identity without reading API credentials."""
+    if not isinstance(protocol,dict):return False
+    try:
+        expected=current_profile_metadata(tasks,protocol.get('mode','no_reference'))
+        for key,value in expected.items():
+            if key in ('temperature','max_tokens_per_criterion') and infer_profile(tasks)=='text':
+                # The existing text adapter explicitly supports reasoning_chat.
+                if 'request_parameters' in protocol:continue
+            if protocol.get(key)!=value:return False
+        params=protocol.get('request_parameters',request_parameters({}))
+        if not isinstance(params,dict):return False
+        if 'max_completion_tokens' in params:
+            if infer_profile(tasks)=='asset' or set(params)-{'max_completion_tokens','reasoning_effort','store'}:return False
+            config={'request_profile':'reasoning_chat',**params}
+            if request_parameters(config)!=params:return False
+        elif (params.get('temperature')!=0 or params.get('max_tokens')!=500
+              or set(params)-{'temperature','max_tokens','store'}):return False
+        if 'store' in params and not isinstance(params['store'],bool):return False
+        if protocol.get('temperature')!=params.get('temperature'):return False
+        if protocol.get('max_tokens_per_criterion')!=params.get('max_tokens',params.get('max_completion_tokens')):return False
+        return True
+    except (JudgeError,ValueError,TypeError,KeyError,OSError):
+        return False
 
 
 def load_credentials(args) -> dict:
@@ -331,23 +438,42 @@ def load_manifest(path: Path | None):
     return load_generation_records(path)
 
 
-def prepare_case(task: dict, args, manifest, protocol: dict) -> tuple[dict, dict]:
+def prepare_case(task: dict, args, manifest, protocol: dict, *, asset_references=None) -> tuple[dict, dict]:
+    profile=_task_profile(task)
     source_path=(args.dataset/task['image']).resolve()
     source=read_rgb(source_path)
-    if args.generation_manifest is not None:
-        from output_adapter import load_prediction
-        record=manifest.get(task['id'])
-        if record is None:raise JudgeError('Generation manifest is missing case ID')
-        prediction,provenance=load_prediction(task,args.dataset,record=record,manifest_path=args.generation_manifest)
-    else:
-        if args.predictions is None:raise JudgeError('Specify --predictions or --generation-manifest')
-        pred_path=(args.predictions/task.get('output_filename',task['id']+'.png')).resolve()
-        prediction=read_rgb(pred_path)
-        provenance={'rgb_output':str(pred_path),'rgb_sha256':digest(pred_path.read_bytes()),
-                    'evaluation_roi':[0,0,source.shape[1],source.shape[0]]}
-    if source.shape!=prediction.shape:raise JudgeError('Source and prediction evaluation ROI dimensions differ')
+    try:
+        if args.generation_manifest is not None:
+            from output_adapter import load_prediction
+            record=manifest.get(task['id'])
+            if record is None:
+                if profile=='asset':raise ModelOutputError('Generation manifest is missing model output for case ID')
+                raise JudgeError('Generation manifest is missing case ID')
+            if profile=='asset' and record.get('status')!='complete':
+                raise ModelOutputError('Generation did not produce a completed model output')
+            prediction,provenance=load_prediction(task,args.dataset,record=record,manifest_path=args.generation_manifest)
+        else:
+            if args.predictions is None:raise JudgeError('Specify --predictions or --generation-manifest')
+            pred_path=(args.predictions/task.get('output_filename',task['id']+'.png')).resolve()
+            prediction=read_rgb(pred_path)
+            provenance={'rgb_output':str(pred_path),'rgb_sha256':digest(pred_path.read_bytes()),
+                        'evaluation_roi':[0,0,source.shape[1],source.shape[0]]}
+        if source.shape!=prediction.shape:raise JudgeError('Source and prediction evaluation ROI dimensions differ')
+    except ModelOutputError:
+        raise
+    except (JudgeError,ValueError,OSError,KeyError) as exc:
+        if profile=='asset':
+            # A completed manifest is a provenance claim. Contradictory source,
+            # instruction, ROI, adapter or file hashes must block publication,
+            # rather than being swallowed as ordinary generation failures.
+            if args.generation_manifest is not None and not isinstance(exc,OSError):
+                raise JudgeError('Invalid generation provenance: '+str(exc)) from exc
+            raise ModelOutputError('Unusable model output: '+str(exc)) from exc
+        raise
     source_url=image_data_url(source);prediction_url=image_data_url(prediction)
     reference=None;reference_hash=None
+    if profile=='asset' and args.mode!='no_reference':
+        raise JudgeError('Asset judging does not accept a reference target')
     if args.mode=='reference':
         ref_path=args.dataset/'cases'/task['id']/'target.png'
         reference_array=read_rgb(ref_path)
@@ -355,7 +481,16 @@ def prepare_case(task: dict, args, manifest, protocol: dict) -> tuple[dict, dict
         reference=image_data_url(reference_array);reference_hash=digest(reference_array.tobytes())
     knowledge=task.get('knowledge_prompt')
     if knowledge is not None and (not isinstance(knowledge,str) or not knowledge.strip()):knowledge=None
-    dimensions=list(STANDARD_DIMENSIONS)+(['SE'] if knowledge else [])
+    dimensions=dimensions_for_task(task,profile)
+    methods=asset_profile.METHODS if profile=='asset' else METHODS
+    view_metadata=None;view_urls=None
+    if profile=='asset':
+        try:
+            if asset_references is None:asset_references=asset_profile.load_references(args.dataset)
+            views,view_metadata=asset_profile.fixed_views(args.dataset,task,source,prediction,asset_references)
+        except (ValueError,OSError,KeyError) as exc:
+            raise JudgeError('Invalid asset judge views: '+str(exc)) from exc
+        view_urls=[image_data_url(view) for view in views]
     # Preserve the paid-score identity when only validation diagnostics are
     # added to provenance. The image bytes/pixels, instruction and judge
     # protocol remain independently bound below and are revalidated first.
@@ -363,20 +498,25 @@ def prepare_case(task: dict, args, manifest, protocol: dict) -> tuple[dict, dict
                     'source_size','canvas_size','evaluation_roi','padding','adapter_version')
                    if args.generation_manifest is not None else ('rgb_output','rgb_sha256','evaluation_roi'))
     identity_provenance={key:provenance[key] for key in legacy_fields if key in provenance}
-    signature=canonical_hash({'source_sha256':digest(source_path.read_bytes()),
+    signature_payload={'source_sha256':digest(source_path.read_bytes()),
         'prediction_pixels_sha256':digest(prediction.tobytes()),'reference_pixels_sha256':reference_hash,
-        'provenance':identity_provenance,'instruction':task['instruction'],'editing_method':METHODS[task['operation']],
-        'knowledge_prompt':knowledge,'protocol_sha256':canonical_hash(protocol)})
+        'provenance':identity_provenance,'instruction':task['instruction'],'editing_method':methods[task['operation']],
+        'knowledge_prompt':knowledge,'protocol_sha256':canonical_hash(protocol)}
+    if profile=='asset':signature_payload.update(judge_profile='asset',input_protocol=task['input_protocol'],views=view_metadata)
+    signature=canonical_hash(signature_payload)
     record={'id':task['id'],'source_id':task.get('source_id'),'domain':task.get('domain'),
-        'operation':task['operation'],'instruction':task['instruction'],'editing_method':METHODS[task['operation']],
+        'operation':task['operation'],'instruction':task['instruction'],'editing_method':methods[task['operation']],
         'fingerprint':signature,'status':'not_scored','prediction_provenance':provenance,
         'dimensions':{d:{'status':'not_scored','score':None,'rationale':None} for d in dimensions}}
-    if not knowledge:record['dimensions']['SE']={'status':'not_applicable','score':None,'reason':'No explicit knowledge_prompt; follows official optional SE rule.'}
+    if profile=='asset':record.update(judge_profile='asset',input_protocol=task['input_protocol'],generation_status='valid',judge_views=view_metadata)
+    elif not knowledge:record['dimensions']['SE']={'status':'not_applicable','score':None,'reason':'No explicit knowledge_prompt; follows official optional SE rule.'}
     urls={'source':source_url,'prediction':prediction_url,'reference':reference}
+    if profile=='asset':urls['views']=view_urls
     return record,urls
 
 
-def summarize(records: list[dict]) -> dict:
+def summarize(records: list[dict], profile: str = 'text') -> dict:
+    if profile=='asset':return summarize_assets(records)
     result={'expected':len(records),'scored':sum(r['status']=='scored' for r in records),
             'pending':sum(r['status']=='not_scored' for r in records),
             'errors':sum(r['status'] in {'error','partial_error'} for r in records),'criteria':{}}
@@ -391,7 +531,46 @@ def summarize(records: list[dict]) -> dict:
     return result
 
 
+def summarize_assets(records: list[dict]) -> dict:
+    """Conditional quality means plus a fixed-denominator joint pass rate."""
+    complete=all(row.get('status') in ('scored','model_failure') for row in records)
+    def group(rows):
+        expected=len(rows)
+        valid=[row for row in rows if row.get('generation_status')=='valid']
+        scored=[row for row in valid if row.get('status')=='scored']
+        failures=sum(row.get('status')=='model_failure' for row in rows)
+        ready=complete and len(scored)==len(valid)
+        criteria={}
+        for dimension in asset_profile.DIMENSIONS:
+            values=[row['dimensions'][dimension]['score'] for row in valid
+                    if row['dimensions'][dimension]['status']=='scored']
+            criteria[dimension]={'mean':sum(values)/len(values) if ready and values else None,
+                'scored':len(values),'expected':expected,'judge_expected':len(valid),
+                'coverage':len(values)/expected if expected else None,
+                'judge_coverage':len(values)/len(valid) if valid else None,
+                'mean_denominator':'valid model outputs only'}
+        means=[criteria[d]['mean'] for d in asset_profile.DIMENSIONS]
+        qualified=sum(all(row['dimensions'][d]['score']>=4 for d in asset_profile.DIMENSIONS) for row in scored)
+        return {'expected':expected,'valid_outputs':len(valid),'model_failures':failures,'scored':len(scored),
+            'pending':sum(row.get('status')=='not_scored' for row in rows),
+            'errors':sum(row.get('status') in ('error','partial_error') for row in rows),
+            'formal_complete':ready,'valid_output_coverage':len(valid)/expected if expected else None,
+            'criteria':criteria,'four_dimension_mean':sum(means)/4 if all(v is not None for v in means) else None,
+            'joint_qualification':{'threshold_each':4,'qualified':qualified,'expected':expected,
+                                   'rate':qualified/expected if ready and expected else None,
+                                   'model_failures_count_as_unqualified':True}}
+    result=group(records)
+    result['by_operation']={operation:group([row for row in records if row['operation']==operation])
+                            for operation in asset_profile.METHODS}
+    return result
+
+
 def unprocessed_record(task: dict) -> dict:
+    if _task_profile(task)=='asset':
+        return {'id':task['id'],'operation':task['operation'],'judge_profile':'asset',
+                'generation_status':'pending','status':'not_scored',
+                'dimensions':{d:{'status':'not_scored','score':None,'rationale':None,'reason':'not_processed'}
+                              for d in asset_profile.DIMENSIONS}}
     dimensions={d:{'status':'not_scored','score':None,'rationale':None,'reason':'not_processed'}
                 for d in STANDARD_DIMENSIONS}
     knowledge=task.get('knowledge_prompt')
@@ -412,25 +591,17 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
     if type(workers) is not int or not 1<=workers<=32:
         raise JudgeError('--workers must be an integer in [1,32]')
     tasks=load_tasks(args.tasks or args.dataset/'tasks.jsonl',args.ids)
-    prompt_data=json.loads(PROMPT_FILE.read_text())
-    prompt_item=prompt_data['modes'][args.mode]
-    prompt_source=resolve_prompt_source(prompt_item)
-    prompts=prompt_item['prompts']
+    profile=infer_profile(tasks)
+    metadata=current_profile_metadata(tasks,args.mode)
+    prompts=(asset_profile.PROMPTS if profile=='asset'
+             else json.loads(PROMPT_FILE.read_text())['modes'][args.mode]['prompts'])
+    asset_references=asset_profile.load_references(args.dataset) if profile=='asset' else None
     credentials=load_credentials(args)
-    protocol={'version':PROTOCOL_VERSION,'mode':args.mode,'judge_model':credentials['model'],
-        'endpoint':credentials['endpoint'],'prompts_sha256':digest(PROMPT_FILE.read_bytes()),
-        'prompt_source':str(prompt_source),
-        'prompt_source_sha256':prompt_data['modes'][args.mode]['source_sha256'],
-        'user_message_template':'Verbatim official mode-specific text; validated RGB PNG image URLs',
-        'criteria':list(STANDARD_DIMENSIONS),'optional_SE':'Only explicit knowledge_prompt',
-        'score_range':[0,5],'temperature':0,'max_tokens_per_criterion':500,
-        'separate_request_per_criterion':True,'independent_case_context':True,
-        'images':'source + prediction ROI' if args.mode=='no_reference' else 'source + prediction ROI + reference',
-        'image_encoding':'Lossless RGB PNG; padding removed only from in-memory arrays; files unchanged',
-        'operation_mapping':METHODS,'API_failure_scores':'null; never fabricated zero',
-        'aggregate_means':'null unless every applicable expected case has a scored result',
-        'API_connectivity_validated_by_dry_run':False}
+    protocol={**metadata,'judge_model':credentials['model'],'endpoint':credentials['endpoint']}
     parameters=credentials['request_parameters']
+    if profile=='asset' and (parameters.get('temperature')!=0 or parameters.get('max_tokens')!=500
+                            or set(parameters)-{'temperature','max_tokens','store'}):
+        raise JudgeError('Asset judging requires temperature=0 and max_tokens=500')
     if parameters!=request_parameters({}):
         # Leave old official fingerprints identical. Explicit alternate API
         # parameters participate in input/cache and cross-model comparison IDs.
@@ -452,13 +623,12 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
                        'cache_scope':'Validated paid scores for all historical IDs and input/judge fingerprints; excluded from this report denominator'}}
     positions={r['id']:i for i,r in enumerate(report['results'])}
     state_lock=Lock();stop=Event()
-    counts={'done':0,'failed':0,'cached':0,'cases':0}
+    counts={'done':0,'failed':0,'cached':0,'cases':0,'model_failures':0}
     report['resume']={'enabled':args.resume,'cached_dimensions':0}
     if args.resume and old and getattr(args,'progress',True):
         available=sum(len(record['dimensions']) for record in old.values())
         print(f'MLLM resume: {available} successful cached dimensions found; validating inputs before reuse.',file=sys.stderr,flush=True)
-    total_dimensions=sum(len(STANDARD_DIMENSIONS)+(isinstance(task.get('knowledge_prompt'),str)
-                         and bool(task['knowledge_prompt'].strip())) for task in tasks)
+    total_dimensions=sum(len(dimensions_for_task(task,profile)) for task in tasks)
     report['execution']={'workers':workers,'concurrency_unit':'case','maximum_simultaneous_api_requests':workers}
     def counted_transport(*values):
         with state_lock:
@@ -473,7 +643,7 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
         report['resume']['cached_dimensions']=counts['cached']
         merge_cached_scores(old,report['results'])
         write_json(cache_path(args.output),{'schema_version':CACHE_SCHEMA_VERSION,'records':list(old.values())})
-        report['summary']=summarize(report['results']);write_json(args.output,report)
+        report['summary']=summarize(report['results'],profile);write_json(args.output,report)
     def safe_error(exc):
         text=str(exc) if isinstance(exc,(JudgeError,FileNotFoundError,ValueError)) else type(exc).__name__
         return text.replace(credentials['api_key'],'[REDACTED]') if credentials['api_key'] else text
@@ -481,18 +651,25 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
     def failed_case(task,exc):
         with state_lock:
             existing=report['results'][positions[task['id']]]
-            existing.update(status='error',error=safe_error(exc))
+            model_failure=profile=='asset' and isinstance(exc,ModelOutputError)
+            existing.update(status='model_failure' if model_failure else 'error',error=safe_error(exc))
+            if profile=='asset':
+                existing.update(generation_status='failed' if model_failure else existing.get('generation_status','unknown'),
+                                failure_type='model_output' if model_failure else 'evaluation_input')
+                if model_failure:
+                    existing['joint_qualified']=False;counts['model_failures']+=1
             for value in existing['dimensions'].values():
                 if value['status']=='not_scored':
-                    value.update(status='error',error=safe_error(exc))
-                    counts['done']+=1;counts['failed']+=1
+                    value.update(status='not_applicable' if model_failure else 'error',error=safe_error(exc))
+                    counts['done']+=1;counts['failed']+=not model_failure
             counts['cases']+=1
             checkpoint()
 
     def evaluate_case(task):
         if stop.is_set():return
         try:
-            case,urls=prepare_case(task,args,manifest,protocol)
+            if profile=='asset':case,urls=prepare_case(task,args,manifest,protocol,asset_references=asset_references)
+            else:case,urls=prepare_case(task,args,manifest,protocol)
         except Exception as exc:
             failed_case(task,exc);return
         with state_lock:
@@ -515,7 +692,8 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
                     counts['done']+=1;checkpoint()
             else:
                 try:
-                    messages=build_messages(dimension,prompts[dimension],task,urls['source'],urls['prediction'],urls['reference'])
+                    messages=(asset_profile.build_messages(dimension,task,urls['views']) if profile=='asset' else
+                              build_messages(dimension,prompts[dimension],task,urls['source'],urls['prediction'],urls['reference']))
                     result=request_score(dimension,messages,credentials,counted_transport,sleeper)
                 except Exception as exc:
                     failed_case(task,exc);return
@@ -527,6 +705,9 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
         with state_lock:
             applicable=[v['status'] for v in case['dimensions'].values() if v['status']!='not_applicable']
             case['status']='scored' if all(s=='scored' for s in applicable) else 'partial_error' if 'error' in applicable else 'not_scored'
+            if profile=='asset':
+                case['joint_qualified']=(all(case['dimensions'][d]['score']>=4 for d in asset_profile.DIMENSIONS)
+                                         if case['status']=='scored' else None)
             if not stop.is_set():counts['cases']+=1
             checkpoint()
 
@@ -536,7 +717,8 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
     def refresh_progress():
         with state_lock:
             bar.set_postfix(cases=f'{counts["cases"]}/{len(tasks)}',failed=counts['failed'],
-                            cached=counts['cached'],api_calls=report['api_calls_made'],refresh=False)
+                            cached=counts['cached'],api_calls=report['api_calls_made'],
+                            **({'model_failed':counts['model_failures']} if profile=='asset' else {}),refresh=False)
             bar.update(counts['done']-bar.n)
         bar.refresh()
     pool=ThreadPoolExecutor(max_workers=workers,thread_name_prefix='mllm-judge')
@@ -561,6 +743,8 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
         refresh_progress();bar.close()
     errors=report['summary']['errors'];pending=report['summary']['pending']
     report['status']='error' if errors else 'not_scored' if pending else 'scored'
+    if profile=='asset' and report['status']=='scored' and report['summary']['model_failures']:
+        report['status']='scored_with_model_failures'
     checkpoint()
     return report,1 if errors else 2 if pending and args.require_scoring else 0
 

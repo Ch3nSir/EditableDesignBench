@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 from evaluation_binding import (
-    BINDING_VERSION,canonical_hash,case_binding,dataset_identity,load_tasks,pixel_sources,
+    BINDING_VERSION,ASSET_PIXEL_PROTOCOL,binding_version,dataset_track,canonical_hash,case_binding,dataset_identity,load_tasks,pixel_sources,
     preview_sidecar,source_files,write_json,
 )
 from output_adapter import load_generation_records,load_prediction,sha256_file
@@ -18,7 +18,7 @@ def _pixel_structure_complete(pixel,expected):
     if not pixel or not expected or len(set(expected))!=len(expected):return False
     rows=pixel.get('results',[]);summary=pixel.get('summary') or {}
     names={'mse','psnr','ssim','lpips'}
-    if not (pixel.get('protocol',{}).get('version')=='texteditbench-official-pixels-v2'
+    if not (pixel.get('protocol',{}).get('version') in ('texteditbench-official-pixels-v2',ASSET_PIXEL_PROTOCOL)
             and pixel.get('complete') is True and pixel.get('valid')==len(expected)
             and len(rows)==len(expected) and {r.get('id') for r in rows}==set(expected)
             and summary.get('complete') is True and summary.get('expected')==len(expected)
@@ -44,16 +44,20 @@ def pixel_inputs_match(pixel,expected,*,dataset_root=None,manifest_path=None,pro
         if not isinstance(rows,list) or len(rows)!=len(expected) or {r.get('id') for r in rows}!=set(expected):
             raise ValueError('Pixel report case IDs differ')
         protocol=pixel['protocol']
-        if protocol.get('version')!='texteditbench-official-pixels-v2':raise ValueError('Pixel metric protocol changed')
-        if protocol.get('artifact_binding_version')!=BINDING_VERSION:raise ValueError('Pixel report has no current input binding')
         root=Path(dataset_root or protocol['dataset']['dataset_root']).resolve()
+        tasks=load_tasks(root)
+        asset=dataset_track(tasks)=='asset'
+        expected_protocol=ASSET_PIXEL_PROTOCOL if asset else 'texteditbench-official-pixels-v2'
+        if protocol.get('version')!=expected_protocol:raise ValueError('Pixel metric protocol changed')
+        if protocol.get('artifact_binding_version')!=binding_version(root):raise ValueError('Pixel report has no current input binding')
+        if asset and protocol.get('mask_inputs')!=['pixel_preservation_mask']:
+            raise ValueError('Asset pixels must use the source/instruction preservation mask')
         if protocol.get('dataset')!=dataset_identity(root):raise ValueError('Pixel dataset version changed')
         if protocol.get('evaluator_sources')!=pixel_sources():raise ValueError('Pixel evaluator source changed')
         sources=protocol.get('sources',{})
         if set(sources)!={'mse_psnr.py','lipis_ssim.py'}:raise ValueError('Missing official pixel source identities')
         for source in sources.values():
             if sha256_file(source['path'])!=source['sha256']:raise ValueError('Official pixel source changed')
-        tasks=load_tasks(root)
         records=load_generation_records(manifest_path) if manifest_path else None
         for row in pixel['results']:
             task=tasks[row['id']]
@@ -115,26 +119,35 @@ def _judge_inputs_match(judge,expected,dataset,manifest,provenances):
     # Rebuild only the local input/fingerprint packaging. No request function or
     # credentials are used, so validation cannot contact a judge or spend money.
     from argparse import Namespace
-    from mllm_evaluate import PROTOCOL_VERSION,PROMPT_FILE,prepare_case
+    from mllm_evaluate import prepare_case,validate_report_protocol,dimensions_for_task,ModelOutputError
     protocol=judge['protocol']
-    if protocol.get('version')!=PROTOCOL_VERSION or protocol.get('prompts_sha256')!=sha256_file(PROMPT_FILE):
+    tasks=load_tasks(dataset)
+    if not validate_report_protocol(protocol,[tasks[cid] for cid in expected]):
         raise ValueError('MLLM prompt protocol changed')
-    if sha256_file(protocol['prompt_source'])!=protocol['prompt_source_sha256']:
-        raise ValueError('Official MLLM prompt source changed')
-    if protocol.get('mode') not in ('no_reference','reference'):raise ValueError('Invalid MLLM mode')
     args=Namespace(dataset=dataset,generation_manifest=manifest,predictions=None,mode=protocol['mode'])
-    tasks=load_tasks(dataset);records=load_generation_records(manifest)
+    records=load_generation_records(manifest)
     if len(judge['results'])!=len(expected) or {r['id'] for r in judge['results']}!=set(expected):
         raise ValueError('MLLM case IDs differ')
     for row in judge['results']:
-        case,_=prepare_case(tasks[row['id']],args,records,protocol)
-        if row.get('fingerprint')!=case['fingerprint'] or row.get('prediction_provenance')!=provenances[row['id']]:
+        try:
+            case,_=prepare_case(tasks[row['id']],args,records,protocol)
+        except ModelOutputError:
+            if (dataset_track([tasks[row['id']]])!='asset' or row.get('status')!='model_failure'
+                    or row.get('joint_qualified') is not False
+                    or set(row.get('dimensions',{}))!=set(dimensions_for_task(tasks[row['id']],'asset'))
+                    or any(v.get('status')!='not_applicable' or v.get('score') is not None
+                           for v in row.get('dimensions',{}).values())):
+                raise ValueError(f'{row["id"]}: Invalid model-failure evidence')
+            continue
+        current=case['prediction_provenance']
+        if (row.get('fingerprint')!=case['fingerprint'] or row.get('prediction_provenance')!=current
+                or row['id'] in provenances and current!=provenances[row['id']]):
             raise ValueError(f'{row["id"]}: MLLM inputs changed')
 
 
 def _preview_inputs_match(output,expected,dataset,provenances):
     metadata=json.loads(preview_sidecar(output).read_text())
-    if not metadata.get('complete') or metadata.get('version')!=BINDING_VERSION:
+    if not metadata.get('complete') or metadata.get('version')!=binding_version(dataset):
         raise ValueError('Preview lacks a complete input binding')
     if metadata.get('output_sha256')!=sha256_file(output):raise ValueError('Preview image changed')
     if metadata.get('dataset')!=dataset_identity(dataset):raise ValueError('Preview dataset version changed')
@@ -229,7 +242,7 @@ def main(argv=None):
             errors.append('preview: '+str(exc));preview_ok=False
     passed=gen_ok and pixel_ok and judge_ok and preview_ok
     report={'generation_and_pixel_smoke_passed':passed,'requested_cases':expected,
-        'artifact_binding_version':BINDING_VERSION,'validation_errors':errors,
+        'artifact_binding_version':binding_version(dataset),'validation_errors':errors,
         'generation_identity_version':protocol.get('generation_protocol_version','legacy-unpinned'),
         'pixel_metric_protocol':pixel.get('protocol',{}).get('version') if pixel else None,
         'stages':{'generation':{'passed':gen_ok,'exit_code':a.generation_exit},

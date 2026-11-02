@@ -210,4 +210,91 @@ class FormalReportingTests(unittest.TestCase):
         self.assertEqual((self.dataset/'summary.json').read_bytes(),self.summary_before)
 
 
+class AssetFormalReportingTests(unittest.TestCase):
+    """Asset semantics must remain distinct through the final public table."""
+    tearDown=FormalReportingTests.tearDown
+    pixel_scores=staticmethod(FormalReportingTests.pixel_scores)
+    create_run=FormalReportingTests.create_run
+
+    def setUp(self):
+        FormalReportingTests.setUp(self)
+        refs=[]
+        for task in self.tasks:
+            task.update(input_protocol='asset-edit-single-source-v1',asset_family_id='family-'+task['id'],
+                        instruction='Delete the photo near the center.')
+            folder=self.dataset/'cases'/task['id']
+            with Image.open(folder/'mask.png') as mask:
+                mask.save(folder/'allowed_edit_mask.png')
+                mask.save(folder/'eval_mask.png')
+            refs.append({'id':task['id'],'pixel_preservation_mask':f'cases/{task["id"]}/allowed_edit_mask.png'})
+        (self.dataset/'tasks.jsonl').write_text(''.join(json.dumps(t)+'\n' for t in self.tasks))
+        (self.dataset/'references.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in refs))
+
+    def transport(self,endpoint,key,payload,timeout):
+        self.calls+=1
+        prompt=payload['messages'][0]['content']
+        dimension=next(d for d in ('IF','OA','VC','LP') if '{"'+d+'": X' in prompt)
+        return {'choices':[{'message':{'content':json.dumps({dimension:4,'rationale':'Offline asset evidence.'})},
+                            'finish_reason':'stop'}]}
+
+    def test_asset_profile_reports_oa_and_joint_rate_without_text_ta_or_se(self):
+        run=self.create_run()
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,0);self.assertTrue(report['full_evaluation_complete'])
+        self.assertEqual(report['track'],'asset');self.assertEqual(report['metrics']['OA'],4)
+        self.assertNotIn('TA',report['metrics']);self.assertNotIn('SE',report['metrics'])
+        self.assertEqual(report['joint_qualification']['rate'],1)
+        self.assertEqual(report['by_operation']['delete']['expected'],1)
+        result,code=compare_models.compare_runs(self.runs,self.dataset)
+        self.assertEqual(code,0);self.assertEqual(result['track'],'asset')
+        output=self.root/'asset_comparison.csv';compare_models.write_csv(output,result)
+        headers=output.read_text().splitlines()[0].split(',')
+        self.assertIn('OA',headers);self.assertNotIn('TA',headers)
+        self.assertIn('joint_qualification_rate',headers);self.assertIn('joint_expected',headers)
+
+    def test_text_dimension_cannot_be_silently_substituted_into_asset_report(self):
+        run=self.create_run();path=run/'mllm_scores.json';saved=json.loads(path.read_text())
+        row=saved['results'][0];row['dimensions']['TA']=row['dimensions'].pop('OA')
+        path.write_text(json.dumps(saved))
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,1);self.assertFalse(report['semantic_inputs_valid'])
+        self.assertTrue(any('dimensions differ' in e for e in report['validation_errors']))
+
+    def test_asset_api_failure_blocks_joint_rate_and_all_conditional_means(self):
+        run=self.create_run(fail_dimension='OA')
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,1);self.assertTrue(report['semantic_inputs_valid'])
+        self.assertFalse(report['semantic_complete']);self.assertIsNone(report['joint_qualification']['rate'])
+        self.assertTrue(all(report['metrics'][d] is None for d in ('IF','OA','VC','LP')))
+
+    def test_allowed_region_change_invalidates_asset_pixel_and_detail_bindings(self):
+        run=self.create_run();Image.new('L',(64,64),255).save(self.dataset/'cases/a/allowed_edit_mask.png')
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,1);self.assertFalse(report['pixel_inputs_valid'])
+        self.assertFalse(report['semantic_inputs_valid'])
+
+    def test_gt_union_change_does_not_replace_source_defined_background_mask(self):
+        run=self.create_run();Image.new('L',(64,64),255).save(self.dataset/'cases/a/eval_mask.png')
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,0);self.assertTrue(report['pixel_inputs_valid'])
+
+    def test_missing_asset_output_counts_in_joint_denominator_without_fake_full_completion(self):
+        run=self.create_run(ids=('a','b'))
+        manifest=json.loads((run/'generation_manifest.json').read_text())
+        missing=next(r for r in manifest['records'] if r['id']=='b')
+        Path(missing['raw_output']).unlink()
+        args=judge.parser().parse_args(['--dataset',str(self.dataset),'--generation-manifest',str(run/'generation_manifest.json'),
+            '--ids','a,b','--config',str(run/'judge_config.json'),'--output',str(run/'mllm_scores.json'),'--no-resume'])
+        with patch.dict(os.environ,{'OFFLINE_JUDGE_KEY':'OFFLINE_NOT_REAL'},clear=True):
+            scored,code=judge.evaluate(args,transport=self.transport,sleeper=lambda _:None)
+        self.assertEqual(code,0);self.assertEqual(scored['summary']['model_failures'],1)
+        report,code=formal_report.evaluate_run(run,self.dataset)
+        self.assertEqual(code,1);self.assertFalse(report['generation_complete'])
+        self.assertFalse(report['full_evaluation_complete']);self.assertTrue(report['semantic_complete'])
+        self.assertEqual(report['joint_qualification']['expected'],2)
+        self.assertEqual(report['joint_qualification']['rate'],.5)
+        self.assertEqual(report['metrics']['OA'],4)
+        self.assertEqual(report['semantic_summary']['valid_output_coverage'],.5)
+
+
 if __name__=='__main__':unittest.main()

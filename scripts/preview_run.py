@@ -9,7 +9,7 @@ import shutil
 from PIL import Image,ImageDraw,ImageFont
 from output_adapter import load_generation_records,load_prediction
 from output_adapter import sha256_file
-from evaluation_binding import BINDING_VERSION,case_binding,dataset_identity,preview_sidecar,source_files,write_json
+from evaluation_binding import BINDING_VERSION,binding_version,case_binding,dataset_identity,preview_sidecar,source_files,write_json
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -78,7 +78,7 @@ def main(argv=None):
         'section{margin:28px 0}p{overflow-wrap:anywhere}</style><h1>Editing comparisons</h1>'
         f'<p>{len(tasks)} cases; {len(pages)} pages. The model output files are preserved separately.</p>'
         +''.join(sections)+'\n')
-    write_json(preview_sidecar(a.output),{'version':BINDING_VERSION,'complete':not errors,
+    write_json(preview_sidecar(a.output),{'version':binding_version(dataset),'complete':not errors,
         'preview_format':'paged-comparisons-v1','page_size':a.page_size,'pages':pages,
         'html_index':{'path':index_path.relative_to(a.output.parent).as_posix(),'sha256':sha256_file(index_path)},
         'dataset':dataset_identity(dataset),'sources':source_files(('preview_run.py','output_adapter.py','evaluation_binding.py')),

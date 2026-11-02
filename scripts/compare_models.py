@@ -9,10 +9,11 @@ import tempfile
 
 from evaluation_binding import canonical_hash
 from settings import DATASET_ROOT
-from formal_report import ROOT, PIXEL_NAMES, evaluate_run, write_json
+from formal_report import ROOT, PIXEL_NAMES, ASSET_DIMENSIONS, evaluate_run, write_json
 from mllm_evaluate import STANDARD_DIMENSIONS
 
 VERSION='texteditbench-multi-model-comparison-v1'
+ASSET_VERSION='editabledesignbench-assets-multi-model-comparison-v1'
 
 
 def discover_runs(root):
@@ -37,7 +38,7 @@ def compare_runs(runs_root,dataset_root=ROOT,*,models=None,pixel_only=False,expe
     if missing:raise ValueError('Unknown selected models: '+', '.join(sorted(missing)))
     identities=[(report['model_id'],report['run_id']) for report in reports]
     if len(identities)!=len(set(identities)):raise ValueError('Duplicate model_id/run_id in comparison')
-    common_keys=('dataset','case_ids','resolution_protocol','evaluation_data_sha256','pixel')
+    common_keys=('track','dataset','case_ids','resolution_protocol','evaluation_data_sha256','pixel')
     for key in common_keys:
         values=[report['comparison_protocol'][key] for report in reports]
         # Missing reports remain incomplete rather than inheriting another
@@ -48,19 +49,29 @@ def compare_runs(runs_root,dataset_root=ROOT,*,models=None,pixel_only=False,expe
         judges=[r['comparison_protocol']['judge'] for r in reports if r['comparison_protocol']['judge'] is not None]
         if judges and any(value!=judges[0] for value in judges[1:]):errors.append('Models differ in judge protocol')
     rows=[]
-    fields=(*PIXEL_NAMES,*STANDARD_DIMENSIONS,'SE')
+    tracks={report['track'] for report in reports}
+    if len(tracks)!=1:errors.append('Text and asset tracks cannot share a comparison table')
+    track=reports[0]['track']
+    dimensions=ASSET_DIMENSIONS if track=='asset' else STANDARD_DIMENSIONS
+    semantic_names=dimensions if track=='asset' else (*dimensions,'SE')
+    fields=(*PIXEL_NAMES,*semantic_names,*(('joint_qualification_rate',) if track=='asset' else ()))
     for report in reports:
         complete=report['pixel_complete'] if pixel_only else report['full_evaluation_complete']
         metrics=report['metrics'] if not errors else dict.fromkeys(fields)
-        rows.append({'model_id':report['model_id'],'run_id':report['run_id'],'expected_cases':report['expected_cases'],
+        rows.append({'track':report['track'],'model_id':report['model_id'],'run_id':report['run_id'],'expected_cases':report['expected_cases'],
             'status':report['status'],'complete':bool(complete and not errors),'pixel_complete':report['pixel_complete'],
             'semantic_complete':report['semantic_complete'],'metrics':metrics,
             'pixel_coverage':report['pixel_coverage'],'semantic_coverage':report['semantic_coverage'],
-            'validation_errors':report['validation_errors'],'run_dir':report['run_dir']})
+            'validation_errors':report['validation_errors'],'run_dir':report['run_dir'],
+            **({'joint_qualification':report.get('joint_qualification') if not errors else None,
+                'semantic_summary':report.get('semantic_summary') if not errors else None,
+                'by_operation':report.get('by_operation',{}) if not errors else {}} if track=='asset' else {})})
     complete=not errors and all(row['complete'] for row in rows)
     protocol=reports[0]['comparison_protocol']
     if pixel_only:protocol={k:v for k,v in protocol.items() if k!='judge'}
-    result={'version':VERSION,'status':'incompatible' if errors else 'complete' if complete else 'incomplete',
+    result={'version':ASSET_VERSION if track=='asset' else VERSION,'track':track,
+        'semantic_dimensions':list(dimensions),
+        'status':'incompatible' if errors else 'complete' if complete else 'incomplete',
         'complete':complete,'pixel_only':pixel_only,'expected_cases':reports[0]['expected_cases'],
         'scope':reports[0]['scope'],'model_runs':len(rows),'comparison_protocol':protocol,
         'comparison_protocol_sha256':canonical_hash(protocol),'validation_errors':errors,
@@ -70,23 +81,34 @@ def compare_runs(runs_root,dataset_root=ROOT,*,models=None,pixel_only=False,expe
 
 def write_csv(path,result):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
-    names=(*PIXEL_NAMES,*STANDARD_DIMENSIONS,'SE')
-    columns=['model_id','run_id','status','expected_cases','complete',*names]
+    asset=result.get('track')=='asset'
+    dimensions=ASSET_DIMENSIONS if asset else STANDARD_DIMENSIONS
+    semantic_names=dimensions if asset else (*dimensions,'SE')
+    names=(*PIXEL_NAMES,*semantic_names,*(('joint_qualification_rate',) if asset else ()))
+    columns=['track','model_id','run_id','status','expected_cases','complete',*names]
     for name in PIXEL_NAMES:columns.extend([name+'_valid',name+'_failed',name+'_coverage'])
-    for name in (*STANDARD_DIMENSIONS,'SE'):columns.extend([name+'_scored',name+'_expected',name+'_coverage'])
+    for name in semantic_names:columns.extend([name+'_scored',name+'_expected',name+'_coverage'])
+    if asset:columns.extend(['joint_qualified','joint_expected','generation_valid_outputs',
+                             'generation_model_failures','generation_coverage'])
     temp=None
     try:
         with tempfile.NamedTemporaryFile(mode='w',dir=path.parent,prefix=path.name+'.',suffix='.tmp',newline='',delete=False) as stream:
             temp=Path(stream.name);writer=csv.DictWriter(stream,fieldnames=columns);writer.writeheader()
             for row in result.get('results',[]):
-                flat={key:row.get(key) for key in ('model_id','run_id','status','expected_cases','complete')}
+                flat={key:row.get(key) for key in ('track','model_id','run_id','status','expected_cases','complete')}
                 flat.update(row['metrics'])
                 for name in PIXEL_NAMES:
                     values=row['pixel_coverage'].get(name,{})
                     flat.update({name+'_'+key:values.get(key) for key in ('valid','failed','coverage')})
-                for name in (*STANDARD_DIMENSIONS,'SE'):
+                for name in semantic_names:
                     values=row['semantic_coverage'].get(name,{})
                     flat.update({name+'_'+key:values.get(key) for key in ('scored','expected','coverage')})
+                if asset:
+                    joint=row.get('joint_qualification') or {};summary=row.get('semantic_summary') or {}
+                    flat.update(joint_qualified=joint.get('qualified'),joint_expected=joint.get('expected'),
+                                generation_valid_outputs=summary.get('valid_outputs'),
+                                generation_model_failures=summary.get('model_failures'),
+                                generation_coverage=summary.get('valid_output_coverage'))
                 writer.writerow(flat)
         temp.replace(path)
     finally:

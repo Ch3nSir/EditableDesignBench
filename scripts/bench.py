@@ -17,7 +17,7 @@ import sys
 import tempfile
 import uuid
 
-from evaluation_binding import canonical_hash,load_tasks
+from evaluation_binding import canonical_hash,load_tasks,resolve_track_root
 from generate_models import select_tasks
 from model_registry import MODEL_CONFIGS
 import model_registry
@@ -116,14 +116,19 @@ def _safe_path(path):
 
 
 def plan_experiment(args):
-    root=_safe_path(args.output_root);dataset=_safe_path(args.dataset_root)
+    root=_safe_path(args.output_root);dataset=resolve_track_root(args.dataset_root,getattr(args,'track',None))
     if args.smoke:
         ids=(SCRIPTS/'smoke_cases.txt').read_text().strip()
         tasks=select_tasks(dataset,ids)
+    elif getattr(args,'sample',None) is not None:
+        from sampling import sample_tasks
+        tasks=sample_tasks(select_tasks(dataset,None,True),args.sample,args.sample_seed)
     else:tasks=select_tasks(dataset,args.ids,args.all)
     selected=model_ids(args.models)
     experiment={'schema_version':1,'dataset_root':str(dataset),'case_ids':[task['id'] for task in tasks],
                 'run_id':args.run_id or root.name,'models':selected,'resolution_protocol':'native-pad32-v1'}
+    if getattr(args,'sample',None) is not None:
+        experiment['sampling']={'method':'operation-stratified-source-diverse-v1','count':args.sample,'seed':args.sample_seed}
     if not experiment['run_id'].strip():raise ValueError('Run ID cannot be empty')
     path=root/'experiment.json';previous=read_json(path)
     if previous is not None:
@@ -248,13 +253,13 @@ def evaluation_context(args):
     root=_safe_path(args.runs_root);experiment=read_json(root/'experiment.json')
     single=read_json(root/'protocol.json')
     if experiment:
-        dataset=Path(args.dataset_root or experiment['dataset_root']).resolve()
+        dataset=resolve_track_root(args.dataset_root or experiment['dataset_root'],getattr(args,'track',None))
         if str(dataset)!=experiment['dataset_root']:raise ValueError('Evaluation dataset differs from experiment')
         available=experiment['models'];expected=experiment['case_ids']
     elif single:
-        dataset=Path(args.dataset_root or ROOT).resolve();available=[single['model_id']];expected=single['case_ids']
+        dataset=resolve_track_root(args.dataset_root or DATASET_ROOT,getattr(args,'track',None));available=[single['model_id']];expected=single['case_ids']
     else:
-        dataset=Path(args.dataset_root or ROOT).resolve()
+        dataset=resolve_track_root(args.dataset_root or DATASET_ROOT,getattr(args,'track',None))
         protocols=[read_json(path) for path in root.glob('*/protocol.json')]
         available=[p['model_id'] for p in protocols if p]
         if not available:raise ValueError('No experiment.json or generated model runs found')
@@ -340,7 +345,7 @@ def evaluate_predictions(args):
     if args.models!='all':raise ValueError('--predictions evaluates one model folder per command; omit --models')
     predictions=_safe_path(args.predictions)
     if not predictions.is_dir():raise ValueError('Predictions directory does not exist')
-    dataset=_safe_path(args.dataset_root or DATASET_ROOT)
+    dataset=resolve_track_root(args.dataset_root or DATASET_ROOT,getattr(args,'track',None))
     tasks=select_tasks(dataset,args.ids,args.ids is None)
     ids=','.join(task['id'] for task in tasks)
     output=_safe_path(args.output_dir or ROOT/'results'/predictions.name)
@@ -418,10 +423,13 @@ def parser():
     download.add_argument('--python',default=sys.executable)
     generate_p=sub.add_parser('generate',help='Generate each selected model into an isolated directory')
     generate_p.add_argument('--models',default='all');generate_p.add_argument('--dataset-root',type=Path,default=DATASET_ROOT)
+    generate_p.add_argument('--track',choices=('text','asset'),help='Dataset track; text by default, asset selects the assets subdirectory')
     generate_p.add_argument('--model-config',type=Path,help='Additional Diffusers model profiles in JSON')
     generate_p.add_argument('--output-root',required=True,type=Path);generate_p.add_argument('--run-id')
     scope=generate_p.add_mutually_exclusive_group(required=True)
     scope.add_argument('--all',action='store_true');scope.add_argument('--ids');scope.add_argument('--smoke',action='store_true')
+    scope.add_argument('--sample',type=int,help='Deterministic operation-stratified subset, prioritizing distinct source designs')
+    generate_p.add_argument('--sample-seed',type=int,default=42,help='Subset selection seed; does not change model inference seed')
     generate_p.add_argument('--preflight',action='store_true');generate_p.add_argument('--submit',action='store_true')
     generate_p.add_argument('--python',default=sys.executable);generate_p.add_argument('--time',default='20:00:00')
     generate_p.add_argument('--cpu-offload',action=argparse.BooleanOptionalAction,default=None)
@@ -433,6 +441,7 @@ def parser():
     inputs.add_argument('--predictions',type=Path,help='Native RGB <case-id>.png images from any model')
     eval_p.add_argument('--ids',help='Comma-separated subset for --predictions; default all dataset cases')
     eval_p.add_argument('--dataset-root',type=Path)
+    eval_p.add_argument('--track',choices=('text','asset'),help='Select a track for external predictions; generated runs remember their dataset')
     eval_p.add_argument('--models',default='all');eval_p.add_argument('--config',type=Path)
     eval_p.add_argument('--no-resume',action='store_false',dest='resume',help='Force recomputation; default skips validated successful pixel metrics and judge dimensions')
     eval_p.add_argument('--workers',type=int,default=5,help='Concurrent judge cases / maximum simultaneous API requests (1-32; default 5)')
@@ -447,6 +456,7 @@ def parser():
     eval_p.add_argument('--no-compare',action='store_true',help=argparse.SUPPRESS)
     comp=sub.add_parser('compare',help='Revalidate runs and export comparable JSON/CSV scores')
     comp.add_argument('--runs-root',required=True,type=Path);comp.add_argument('--dataset-root',type=Path)
+    comp.add_argument('--track',choices=('text','asset'))
     comp.add_argument('--models',default='all');comp.add_argument('--output-dir',type=Path)
     comp.add_argument('--pixel-only',action='store_true');comp.add_argument('--python',default=sys.executable)
     return p

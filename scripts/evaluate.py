@@ -19,7 +19,8 @@ import numpy as np
 from PIL import Image
 
 from output_adapter import load_generation_records, load_prediction
-from evaluation_binding import BINDING_VERSION, canonical_hash, case_binding, dataset_identity, pixel_sources, write_json
+from evaluation_binding import (BINDING_VERSION, ASSET_PIXEL_PROTOCOL, binding_version, dataset_track,
+    preservation_mask_path, canonical_hash, case_binding, dataset_identity, pixel_sources, write_json)
 from official_pixel_metrics import (
     METRICS, PROTOCOL_VERSION, OFFICIAL_EVALUATION, protocol_info, score_case,
 )
@@ -265,19 +266,24 @@ def _evaluate(args):
     try:
         if args.cpu_threads<1:raise ValueError('--cpu-threads must be positive')
         tasks,known=_load_tasks(args.dataset_root,args.ids)
+        track=dataset_track(tasks)
         records=load_generation_records(args.generation_manifest) if args.generation_manifest else {}
         unknown=sorted(set(records)-set(known))
         if unknown:raise ValueError('Generation manifest has unknown dataset IDs: '+', '.join(unknown))
         protocol.update(protocol_info(args.official_evaluation_dir))
+        if track=='asset':
+            protocol.update(version=ASSET_PIXEL_PROTOCOL,track='asset',
+                comparison='Prediction versus source outside the source/instruction allowed-edit region.',
+                mask_policy='references.jsonl pixel_preservation_mask; unique GT target region is not a scoring mask')
         versions={}
         for package in ('numpy','opencv-python','opencv-python-headless','torch','torchvision','torchmetrics','tabulate'):
             try:versions[package]=importlib.metadata.version(package)
             except importlib.metadata.PackageNotFoundError:pass
         protocol.update(device=args.device,cpu_threads=args.cpu_threads,software_versions=versions,
-            artifact_binding_version=BINDING_VERSION,dataset=dataset_identity(args.dataset_root),
+            artifact_binding_version=binding_version(args.dataset_root),dataset=dataset_identity(args.dataset_root),
             evaluator_sources=pixel_sources(),
             prediction_adaptation='Verified native RGB or explicit right/bottom-padding ROI before official metric calculations; raw files unchanged',
-            mask_inputs=['mask.png','target_region_mask.png'],
+            mask_inputs=['pixel_preservation_mask'] if track=='asset' else ['mask.png','target_region_mask.png'],
             completion_note='Official pixel metrics measure preservation, not instruction success. MLLM scoring remains separate.',
             coverage_policy='Every metric has its own requested denominator, valid/failed/pending counts and coverage. Only that metric\'s incomplete mean is null; any incomplete metric makes the overall run fail.',
             case_counts='valid counts cases with all four metrics; failed includes partial cases with at least one failed metric; partial is a subset of failed.',
@@ -319,11 +325,13 @@ def _evaluate(args):
                 if image.mode!='RGB':raise ValueError('Source image must be RGB')
                 source=np.asarray(image).copy()
             masks=[]
-            for filename in ('mask.png','target_region_mask.png'):
-                with Image.open(folder/filename) as image:mask=np.asarray(image).copy()
+            mask_paths=[preservation_mask_path(task,args.dataset_root)] if track=='asset' else [folder/name for name in ('mask.png','target_region_mask.png')]
+            for mask_path in mask_paths:
+                with Image.open(mask_path) as image:mask=np.asarray(image).copy()
                 if mask.ndim!=2 or mask.shape!=source.shape[:2] or mask.dtype!=np.uint8 or not np.all((mask==0)|(mask==255)):
-                    raise ValueError(f'{filename} must be same-size binary grayscale')
+                    raise ValueError(f'{mask_path.name} must be same-size binary grayscale')
                 masks.append(mask)
+            if track=='asset':masks.append(np.zeros(source.shape[:2],dtype=np.uint8))
             if prediction.shape!=source.shape:raise ValueError('Source and prediction dimensions differ')
             row['provenance']=provenance
             row['input_binding']=case_binding(task,args.dataset_root,provenance,masks=True)
