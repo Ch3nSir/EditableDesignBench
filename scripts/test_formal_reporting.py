@@ -267,11 +267,11 @@ class AssetFormalReportingTests(unittest.TestCase):
         self.assertFalse(report['semantic_complete']);self.assertIsNone(report['joint_qualification']['rate'])
         self.assertTrue(all(report['metrics'][d] is None for d in ('IF','OA','VC','LP')))
 
-    def test_allowed_region_change_invalidates_asset_pixel_and_detail_bindings(self):
+    def test_allowed_region_change_invalidates_only_asset_pixels_not_full_image_judge(self):
         run=self.create_run();Image.new('L',(64,64),255).save(self.dataset/'cases/a/allowed_edit_mask.png')
         report,code=formal_report.evaluate_run(run,self.dataset)
         self.assertEqual(code,1);self.assertFalse(report['pixel_inputs_valid'])
-        self.assertFalse(report['semantic_inputs_valid'])
+        self.assertTrue(report['semantic_inputs_valid'])
 
     def test_gt_union_change_does_not_replace_source_defined_background_mask(self):
         run=self.create_run();Image.new('L',(64,64),255).save(self.dataset/'cases/a/eval_mask.png')

@@ -4,7 +4,7 @@ Default: no-reference evaluation, using source + prediction + user instruction.
 The original MIT-licensed IF/TA/VC/LP(/SE) prompts are snapshotted verbatim in
 mllm_prompts.json; reference mode is explicit and separately identified.
 Asset tasks declare their input protocol and use independent IF/OA/VC/LP
-prompts with full images and fixed source-derived detail views, without GT.
+prompts with two full images, without masks, detail crops or GT.
 """
 from __future__ import annotations
 
@@ -242,13 +242,13 @@ def current_profile_metadata(tasks: list[dict], mode: str = 'no_reference') -> d
             'input_protocol':asset_profile.INPUT_PROTOCOL,
             'prompts_sha256':canonical_hash(asset_profile.PROMPTS),'prompt_source':str(source),
             'prompt_source_sha256':digest(source.read_bytes()),
-            'user_message_template':'Original instruction, asset operation, full source/prediction and fixed same-coordinate details',
+            'user_message_template':'Original instruction, asset operation, full source and full prediction only',
             'message_template_revision':asset_profile.MESSAGE_TEMPLATE_REVISION,
             'criteria':list(asset_profile.DIMENSIONS),'score_range':[0,5],
             'temperature':0,'max_tokens_per_criterion':500,
             'separate_request_per_criterion':True,'independent_case_context':True,
-            'images':'full source + full prediction ROI + fixed source detail + fixed prediction detail',
-            'image_encoding':'Lossless RGB PNG; native full views and symmetric in-memory detail enlargement; files unchanged',
+            'images':'full source + full prediction native ROI; exactly two full images',
+            'image_encoding':'Lossless RGB PNG; native full views only, no detail crops or resizing; files unchanged',
             'view_version':asset_profile.VIEW_VERSION,'view_parameters':dict(asset_profile.VIEW_PARAMETERS),
             'operation_mapping':dict(asset_profile.METHODS),'reference_target_supplied':False,
             'editing_model_identity_supplied':False,'API_failure_scores':'null; never fabricated zero',
@@ -439,7 +439,7 @@ def load_manifest(path: Path | None):
     return load_generation_records(path)
 
 
-def prepare_case(task: dict, args, manifest, protocol: dict, *, asset_references=None) -> tuple[dict, dict]:
+def prepare_case(task: dict, args, manifest, protocol: dict) -> tuple[dict, dict]:
     profile=_task_profile(task)
     source_path=(args.dataset/task['image']).resolve()
     source=read_rgb(source_path)
@@ -487,8 +487,7 @@ def prepare_case(task: dict, args, manifest, protocol: dict, *, asset_references
     view_metadata=None;view_urls=None
     if profile=='asset':
         try:
-            if asset_references is None:asset_references=asset_profile.load_references(args.dataset)
-            views,view_metadata=asset_profile.fixed_views(args.dataset,task,source,prediction,asset_references)
+            views,view_metadata=asset_profile.full_views(source,prediction)
         except (ValueError,OSError,KeyError) as exc:
             raise JudgeError('Invalid asset judge views: '+str(exc)) from exc
         view_urls=[image_data_url(view) for view in views]
@@ -596,7 +595,6 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
     metadata=current_profile_metadata(tasks,args.mode)
     prompts=(asset_profile.PROMPTS if profile=='asset'
              else json.loads(PROMPT_FILE.read_text())['modes'][args.mode]['prompts'])
-    asset_references=asset_profile.load_references(args.dataset) if profile=='asset' else None
     credentials=load_credentials(args)
     protocol={**metadata,'judge_model':credentials['model'],'endpoint':credentials['endpoint']}
     parameters=credentials['request_parameters']
@@ -669,8 +667,7 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
     def evaluate_case(task):
         if stop.is_set():return
         try:
-            if profile=='asset':case,urls=prepare_case(task,args,manifest,protocol,asset_references=asset_references)
-            else:case,urls=prepare_case(task,args,manifest,protocol)
+            case,urls=prepare_case(task,args,manifest,protocol)
         except Exception as exc:
             failed_case(task,exc);return
         with state_lock:

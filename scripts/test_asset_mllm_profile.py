@@ -61,7 +61,7 @@ class AssetJudgeTests(unittest.TestCase):
         urls=[x['image_url']['url'] for x in payload['messages'][1]['content'] if x['type']=='image_url']
         return [Image.open(io.BytesIO(base64.b64decode(url.split(',',1)[1]))) for url in urls]
 
-    def test_auto_profile_four_independent_requests_native_full_images_and_enlarged_details(self):
+    def test_auto_profile_four_independent_requests_exactly_two_native_full_images(self):
         payloads=[]
         def transport(e,k,p,t):payloads.append(p);return self.success(e,k,p,t)
         report,code=judge.evaluate(self.args(),transport=transport)
@@ -76,7 +76,7 @@ class AssetJudgeTests(unittest.TestCase):
             self.assertEqual(payload['temperature'],0);self.assertEqual(payload['max_tokens'],500)
             self.assertEqual(len(payload['messages']),2)
             views=self.decoded_views(payload)
-            self.assertEqual([im.size for im in views],[(640,480),(640,480),(512,512),(512,512)])
+            self.assertEqual([im.size for im in views],[(640,480),(640,480)])
             self.assertTrue(np.array_equal(np.asarray(views[0]),np.full((480,640,3),255,np.uint8)))
             text=json.dumps(payload['messages'])
             self.assertNotIn('secret_edit_model_23',text)
@@ -85,14 +85,15 @@ class AssetJudgeTests(unittest.TestCase):
             self.assertNotIn('"<score 0-5>"',payload['messages'][1]['content'][-1]['text'])
         for row in report['results']:
             self.assertEqual(tuple(row['dimensions']),asset.DIMENSIONS)
-            self.assertEqual(row['judge_views']['crop_box'],[58,58,142,142])
-            self.assertFalse(row['judge_views']['selection_depends_on_prediction'])
+            self.assertEqual(row['judge_views']['image_count'],2)
+            self.assertFalse(row['judge_views']['uses_mask'])
+            self.assertNotIn('crop_box',row['judge_views'])
         self.assertEqual(report['summary']['four_dimension_mean'],4)
         self.assertEqual(report['summary']['joint_qualification']['rate'],1)
         self.assertEqual(set(report['summary']['by_operation']),set(asset.METHODS))
         self.assertTrue(all(row['expected']==1 for row in report['summary']['by_operation'].values()))
 
-    def test_cache_ignores_reference_target_but_invalidates_changed_mask_crop_and_judge(self):
+    def test_cache_ignores_reference_and_masks_but_invalidates_changed_view_protocol_and_judge(self):
         args=self.args('--ids',self.tasks[0]['id'])
         first,_=judge.evaluate(args,transport=self.success)
         refs=self.root/'references.jsonl';rows=[json.loads(line) for line in refs.read_text().splitlines()]
@@ -103,10 +104,10 @@ class AssetJudgeTests(unittest.TestCase):
         mask=self.root/rows[0]['pixel_preservation_mask']
         with Image.open(mask) as im:changed=im.copy()
         changed.putpixel((100,100),0);changed.save(mask)
-        changed_mask,_=judge.evaluate(args,transport=self.success)
-        self.assertEqual(changed_mask['api_calls_made'],4)
-        self.assertNotEqual(first['results'][0]['fingerprint'],changed_mask['results'][0]['fingerprint'])
-        with patch.dict(asset.VIEW_PARAMETERS,{'context_margin_pixels':40}):
+        changed_mask,_=judge.evaluate(args,transport=lambda *a:self.fail('Unused mask invalidated full-image scores'))
+        self.assertEqual(changed_mask['api_calls_made'],0)
+        self.assertEqual(first['results'][0]['fingerprint'],changed_mask['results'][0]['fingerprint'])
+        with patch.dict(asset.VIEW_PARAMETERS,{'full_images':'alternate-protocol-fixture'}):
             changed_crop,_=judge.evaluate(args,transport=self.success)
             self.assertEqual(changed_crop['api_calls_made'],4)
             self.assertNotEqual(changed_mask['results'][0]['fingerprint'],changed_crop['results'][0]['fingerprint'])
@@ -154,10 +155,11 @@ class AssetJudgeTests(unittest.TestCase):
             changed,_=judge.evaluate(args,transport=self.success)
         self.assertEqual(changed['api_calls_made'],4)
         self.assertNotEqual(first['results'][0]['fingerprint'],changed['results'][0]['fingerprint'])
+        self.assertFalse(judge.validate_report_protocol(changed['protocol'],self.tasks))
         restored,_=judge.evaluate(args,transport=lambda *a:self.fail('Current paid namespace was erased'))
         self.assertEqual(restored['api_calls_made'],0)
 
-    def test_bad_output_is_model_failure_bad_mask_is_evaluation_error(self):
+    def test_bad_output_is_model_failure_and_full_image_judge_needs_no_mask_or_references(self):
         path=self.predictions/self.tasks[0]['output_filename'];path.write_bytes(b'not an image')
         report,code=judge.evaluate(self.args('--ids',self.tasks[0]['id']),transport=lambda *a:self.fail('Bad output called API'))
         self.assertEqual(code,0);self.assertEqual(report['summary']['model_failures'],1)
@@ -165,10 +167,12 @@ class AssetJudgeTests(unittest.TestCase):
         self.assertIsNone(report['summary']['four_dimension_mean'])
         Image.new('RGB',(640,480),'blue').save(path)
         mask=self.root/'cases'/self.tasks[0]['id']/'allowed_edit_mask.png'
-        Image.new('L',(640,480),127).save(mask)
-        report,code=judge.evaluate(self.args('--ids',self.tasks[0]['id']),transport=lambda *a:self.fail('Bad mask called API'))
-        self.assertEqual(code,1);self.assertEqual(report['summary']['model_failures'],0)
-        self.assertFalse(report['summary']['formal_complete'])
+        mask.unlink()
+        (self.root/'references.jsonl').unlink()
+        report,code=judge.evaluate(self.args('--ids',self.tasks[0]['id']),transport=self.success)
+        self.assertEqual(code,0);self.assertEqual(report['summary']['model_failures'],0)
+        self.assertTrue(report['summary']['formal_complete'])
+        self.assertEqual(report['api_calls_made'],4)
 
     def test_missing_api_and_dry_run_never_publish_formal_asset_metrics(self):
         with patch.dict(os.environ,{},clear=True):

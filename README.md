@@ -94,7 +94,7 @@ python scripts/bench.py evaluate --predictions predictions/MyModel --workers 10 
 | `<model>/comparison.png` | 原图、目标图与模型结果预览 |
 | `reports/comparison.csv` | 模型对比表 |
 
-像素指标复用 TextEditBench 的实现。MLLM 每例四次独立请求，每维 0–5 分，使用 `temperature=0`、`max_tokens=500`；20 例共 80 次请求，不含重试。文字轨评 IF / TA / VC / LP，资产轨评 IF / OA / VC / LP，并报告四维均 ≥ 4 的联合合格率。两轨分开汇报，评委默认不接收目标图。
+像素指标复用 TextEditBench 的实现。MLLM 每例四次独立请求，每维 0–5 分，使用 `temperature=0`、`max_tokens=500`；20 例共 80 次请求，不含重试。文字轨评 IF / TA / VC / LP，资产轨评 IF / OA / VC / LP，并报告四维均 ≥ 4 的联合合格率。两轨分开汇报；资产评委只接收原图和模型结果两张整图，不裁局部，两轨评委默认均不接收目标图。
 
 资产评分是本项目扩展协议。维度定义、失败处理、输入输出和续跑规则见[进阶用法](docs/advanced.md)。
 
