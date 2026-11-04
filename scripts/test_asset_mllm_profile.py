@@ -105,6 +105,8 @@ class AssetJudgeTests(unittest.TestCase):
                     'VC':{'status':'scored','score':5,'evidence':dict(payload['evidence'],operation='done')}}
         self.assertEqual(asset.consistency_flags(dimensions),['conflicting_target_match','conflicting_operation_status'])
         self.assertEqual(dimensions['OA']['score'],5)
+        unchanged={k:dict(v,evidence=dict(v['evidence'],operation='not_done')) for k,v in dimensions.items()}
+        self.assertEqual(asset.consistency_flags(unchanged),[])
         payload['evidence']['operation']='done'
         self.assertEqual(judge.parse_score(json.dumps(payload),'OA',asset_response=True)['OA'],5)
 

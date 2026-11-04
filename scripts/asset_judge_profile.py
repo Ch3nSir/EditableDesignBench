@@ -5,7 +5,7 @@ import numpy as np
 
 INPUT_PROTOCOL = 'asset-edit-single-source-v1'
 VERSION = 'editabledesignbench-asset-mllm-v3'
-MESSAGE_TEMPLATE_REVISION = 'asset-evidence-full-image-v4'
+MESSAGE_TEMPLATE_REVISION = 'asset-evidence-full-image-v5'
 DIMENSIONS = ('IF', 'OA', 'VC', 'LP')
 METHODS = {name: 'asset_' + name for name in ('delete', 'insert', 'replace', 'move', 'scale')}
 VIEW_VERSION = 'asset-full-images-v2'
@@ -42,7 +42,16 @@ that photo's scene. Follow explicitly described unit boundaries.
 
 Record concise evidence: source state, candidate state, actual change, target
 match (yes/no/uncertain), operation status (done/partial/not_done/wrong/uncertain),
-and a list of visible defects (empty if none). State uncertainty honestly; never
+and a list of visible defects relevant to the named dimension (empty if none).
+Definitions shared by ALL dimensions: target_match means whether the comparison
+and actual edit concern the intended SOURCE unit/empty slot, NOT whether its
+requested final state was achieved. For an unchanged image, use yes if the intended
+source unit/slot is identified, with operation=not_done; the requested object can
+be absent from an insertion slot while target_match=yes. Use no for a visible edit
+on a different source unit/slot. Use uncertain if the source target cannot be
+identified confidently. Operation reports the requested change on the intended
+unit: done, partial, not_done, wrong (different unit/type/direction), or uncertain.
+A failed requested edit alone is not a VC/LP defect. State uncertainty honestly; never
 invent tiny text differences or assert an invisible movement. Do not repeat the
 instruction as evidence. A 5 requires clear visual support and no relevant defect;
 4 allows only a small defect, 3 a material defect, 2 major defects, 1 an almost
@@ -210,7 +219,7 @@ def consistency_flags(dimensions: dict) -> list[str]:
     targets = {e['target_match'] for e in observations}
     operations = {e['operation'] for e in observations}
     flags = []
-    if {'yes', 'no'} <= targets:
+    if {'yes', 'no'} <= targets and operations - {'not_done', 'uncertain'}:
         flags.append('conflicting_target_match')
     if 'done' in operations and operations & {'not_done', 'wrong'}:
         flags.append('conflicting_operation_status')

@@ -149,7 +149,7 @@ python scripts/bench.py compare --runs-root outputs/custom_smoke --models all
 
 每次请求仍只评一个维度，独立核对原图中指定的对象/空位与结果中同一处的变化。新增图片不能由替换另一张已有图片代替；移动整张照片不能由移动照片内的主体代替；删除照片必须删除指定图片单元。
 
-回复除分数和 `rationale` 外，还必须包含 `evidence`：`source`（原图状态）、`candidate`（结果状态）、`change`（实际变化）、`target_match`（`yes/no/uncertain`）、`operation`（`done/partial/not_done/wrong/uncertain`）、`defects`（可见缺陷列表）。证据应描述实际图像，而非复述指令。
+回复除分数和 `rationale` 外，还必须包含 `evidence`：`source`（原图状态）、`candidate`（结果状态）、`change`（实际变化）、`target_match`（`yes/no/uncertain`）、`operation`（`done/partial/not_done/wrong/uncertain`）、`defects`（可见缺陷列表）。证据应描述实际图像，而非复述指令。`target_match` 只判断是否定位并编辑了指定原图对象/空位，不能代替完成度：未编辑图可为 `target_match=yes, operation=not_done`；插入空位仍为空，也不意味着找错了空位。
 
 - 明确改错对象时，IF / OA 最高 1 分；操作或方向错误时 IF 最高 1 分。身份保持完好可使 OA 保持高分，不能用 IF 的失败自动降低其他维度。
 - 仅移动固定照片内部的主体，IF 最高 2 分；无法确认目标或操作完成时，不能给 IF 高分。
