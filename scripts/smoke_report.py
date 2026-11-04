@@ -119,7 +119,7 @@ def _judge_inputs_match(judge,expected,dataset,manifest,provenances):
     # Rebuild only the local input/fingerprint packaging. No request function or
     # credentials are used, so validation cannot contact a judge or spend money.
     from argparse import Namespace
-    from mllm_evaluate import prepare_case,validate_report_protocol,dimensions_for_task,ModelOutputError
+    from mllm_evaluate import prepare_case,validate_report_protocol,dimensions_for_task,ModelOutputError,parse_score
     protocol=judge['protocol']
     tasks=load_tasks(dataset)
     if not validate_report_protocol(protocol,[tasks[cid] for cid in expected]):
@@ -139,6 +139,11 @@ def _judge_inputs_match(judge,expected,dataset,manifest,provenances):
                            for v in row.get('dimensions',{}).values())):
                 raise ValueError(f'{row["id"]}: Invalid model-failure evidence')
             continue
+        if dataset_track([tasks[row['id']]])=='asset':
+            for dimension,value in row.get('dimensions',{}).items():
+                if value.get('status')=='scored':
+                    parse_score(json.dumps({dimension:value.get('score'),'rationale':value.get('rationale'),
+                                            'evidence':value.get('evidence')}),dimension,asset_response=True)
         current=case['prediction_provenance']
         if (row.get('fingerprint')!=case['fingerprint'] or row.get('prediction_provenance')!=current
                 or row['id'] in provenances and current!=provenances[row['id']]):

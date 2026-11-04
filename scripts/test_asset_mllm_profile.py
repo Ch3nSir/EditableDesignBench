@@ -53,13 +53,60 @@ class AssetJudgeTests(unittest.TestCase):
 
     @classmethod
     def success(cls,endpoint,key,payload,timeout):
-        return {'choices':[{'message':{'content':json.dumps({cls.dimension(payload):4,'rationale':'Visible evidence checked.'})},
+        return {'choices':[{'message':{'content':json.dumps({cls.dimension(payload):4,'rationale':'Visible evidence checked.',
+                'evidence':{'source':'Original green vase in the requested slot.',
+                            'candidate':'Requested result in the same slot.',
+                            'change':'The requested unit was edited.',
+                            'target_match':'yes','operation':'done','defects':[]}})},
                             'finish_reason':'stop'}]}
 
     @staticmethod
     def decoded_views(payload):
         urls=[x['image_url']['url'] for x in payload['messages'][1]['content'] if x['type']=='image_url']
         return [Image.open(io.BytesIO(base64.b64decode(url.split(',',1)[1]))) for url in urls]
+
+    def test_evidence_is_required_and_scores_are_not_silently_clamped(self):
+        args=self.args('--ids',self.tasks[0]['id'])
+        def unsupported(e,k,p,t):
+            return {'choices':[{'message':{'content':json.dumps({self.dimension(p):5,'rationale':'Looks good.'})}}]}
+        report,code=judge.evaluate(args,transport=unsupported)
+        self.assertEqual(code,1)
+        self.assertEqual(report['summary']['errors'],1)
+        self.assertTrue(all(v['score'] is None for v in report['results'][0]['dimensions'].values()))
+        self.assertEqual(report['results'][0]['dimensions']['IF']['error'],'Asset judge response requires evidence')
+
+    def test_self_contradictory_response_retries_without_altering_provider_score(self):
+        args=self.args('--ids',self.tasks[0]['id'],'--max-retries','1')
+        attempts={d:0 for d in asset.DIMENSIONS}
+        def transport(e,k,p,t):
+            d=self.dimension(p);attempts[d]+=1
+            result=self.success(e,k,p,t)
+            data=json.loads(result['choices'][0]['message']['content'])
+            if d=='IF' and attempts[d]==1:
+                data['IF']=5;data['evidence']['target_match']='no'
+            result['choices'][0]['message']['content']=json.dumps(data)
+            return result
+        report,code=judge.evaluate(args,transport=transport,sleeper=lambda _:None)
+        self.assertEqual(code,0);self.assertEqual(report['api_calls_made'],5)
+        self.assertEqual(report['results'][0]['dimensions']['IF']['score'],4)
+        self.assertEqual(report['results'][0]['dimensions']['IF']['attempts'],2)
+
+    def test_independent_axes_and_conflicting_observations_are_audited_without_score_changes(self):
+        payload={'OA':5,'rationale':'Identity is intact despite no movement.',
+                 'evidence':{'source':'Original vase.','candidate':'Same vase.', 'change':'No movement.',
+                             'target_match':'yes','operation':'not_done','defects':[]}}
+        self.assertEqual(judge.parse_score(json.dumps(payload),'OA',asset_response=True)['OA'],5)
+        payload['IF']=5
+        with self.assertRaisesRegex(judge.JudgeError,'operation failure'):
+            judge.parse_score(json.dumps(payload),'IF',asset_response=True)
+        del payload['IF']
+        dimensions={'OA':{'status':'scored','score':5,'evidence':payload['evidence']},
+                    'IF':{'status':'scored','score':0,'evidence':dict(payload['evidence'],target_match='no',operation='wrong')},
+                    'VC':{'status':'scored','score':5,'evidence':dict(payload['evidence'],operation='done')}}
+        self.assertEqual(asset.consistency_flags(dimensions),['conflicting_target_match','conflicting_operation_status'])
+        self.assertEqual(dimensions['OA']['score'],5)
+        payload['evidence']['operation']='done'
+        self.assertEqual(judge.parse_score(json.dumps(payload),'OA',asset_response=True)['OA'],5)
 
     def test_auto_profile_four_independent_requests_exactly_two_native_full_images(self):
         payloads=[]

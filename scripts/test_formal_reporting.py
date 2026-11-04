@@ -234,7 +234,9 @@ class AssetFormalReportingTests(unittest.TestCase):
         self.calls+=1
         prompt=payload['messages'][0]['content']
         dimension=next(d for d in ('IF','OA','VC','LP') if '{"'+d+'": X' in prompt)
-        return {'choices':[{'message':{'content':json.dumps({dimension:4,'rationale':'Offline asset evidence.'})},
+        return {'choices':[{'message':{'content':json.dumps({dimension:4,'rationale':'Offline asset evidence.',
+             'evidence':{'source':'Source asset.','candidate':'Edited asset.','change':'Requested edit.',
+                         'target_match':'yes','operation':'done','defects':[]}})},
                             'finish_reason':'stop'}]}
 
     def test_asset_profile_reports_oa_and_joint_rate_without_text_ta_or_se(self):

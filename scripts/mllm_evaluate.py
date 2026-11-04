@@ -249,6 +249,8 @@ def current_profile_metadata(tasks: list[dict], mode: str = 'no_reference') -> d
             'separate_request_per_criterion':True,'independent_case_context':True,
             'images':'full source + full prediction native ROI; exactly two full images',
             'image_encoding':'Lossless RGB PNG; native full views only, no detail crops or resizing; files unchanged',
+            'response_evidence_schema':dict(asset_profile.EVIDENCE_SCHEMA),
+            'consistency_audit':'Conflicting target/operation claims flagged for review; scores are not adjusted',
             'view_version':asset_profile.VIEW_VERSION,'view_parameters':dict(asset_profile.VIEW_PARAMETERS),
             'operation_mapping':dict(asset_profile.METHODS),'reference_target_supplied':False,
             'editing_model_identity_supplied':False,'API_failure_scores':'null; never fabricated zero',
@@ -370,7 +372,7 @@ def build_messages(dimension: str, system_prompt: str, task: dict,
     return [{'role':'system','content':system_prompt},{'role':'user','content':content}]
 
 
-def parse_score(content, dimension: str) -> dict:
+def parse_score(content, dimension: str, *, asset_response: bool = False) -> dict:
     if isinstance(content,list):
         content=''.join(p.get('text','') for p in content if isinstance(p,dict) and p.get('type')=='text')
     if not isinstance(content,str):raise JudgeError('Judge response content is not text')
@@ -386,7 +388,11 @@ def parse_score(content, dimension: str) -> dict:
         raise JudgeError('Judge score must be numeric in [0,5]')
     rationale=data.get('rationale')
     if not isinstance(rationale,str) or not rationale.strip():raise JudgeError('Judge JSON is missing rationale')
-    return {dimension:value,'rationale':rationale}
+    result={dimension:value,'rationale':rationale}
+    if asset_response:
+        try:result['evidence']=asset_profile.validate_evidence(data,dimension)
+        except ValueError as exc:raise JudgeError(str(exc)) from exc
+    return result
 
 
 def post_json(endpoint: str, key: str, payload: dict, timeout: float) -> dict:
@@ -402,7 +408,7 @@ def post_json(endpoint: str, key: str, payload: dict, timeout: float) -> dict:
 
 
 def request_score(dimension: str, messages: list[dict], credentials: dict,
-                  transport: Callable = post_json, sleeper: Callable = time.sleep) -> dict:
+                  transport: Callable = post_json, sleeper: Callable = time.sleep, *, asset_response: bool = False) -> dict:
     retries=credentials['max_retries']
     if not 0<=retries<=10 or credentials['timeout']<=0:raise JudgeError('Invalid retry/timeout configuration')
     last='Judge request failed'
@@ -413,8 +419,9 @@ def request_score(dimension: str, messages: list[dict], credentials: dict,
                  **credentials.get('request_parameters',request_parameters({}))},credentials['timeout'])
             choice=data['choices'][0]
             if choice.get('finish_reason')=='length':raise JudgeError('Judge response hit token limit')
-            result=parse_score(choice['message']['content'],dimension)
+            result=parse_score(choice['message']['content'],dimension,asset_response=asset_response)
             scored={'status':'scored','score':result[dimension],'rationale':result['rationale'],'attempts':attempt+1}
+            if asset_response:scored['evidence']=result['evidence']
             usage=data.get('usage')
             if isinstance(usage,dict):
                 scored['usage']={name:value for name in ('prompt_tokens','completion_tokens','total_tokens')
@@ -560,6 +567,9 @@ def summarize_assets(records: list[dict]) -> dict:
                                    'rate':qualified/expected if ready and expected else None,
                                    'model_failures_count_as_unqualified':True}}
     result=group(records)
+    result['consistency_review']={'cases':sum(bool(asset_profile.consistency_flags(row.get('dimensions',{}))) for row in records),
+                                  'case_ids':[row['id'] for row in records if asset_profile.consistency_flags(row.get('dimensions',{}))],
+                                  'scores_adjusted':False}
     result['by_operation']={operation:group([row for row in records if row['operation']==operation])
                             for operation in asset_profile.METHODS}
     return result
@@ -676,7 +686,8 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
                 for d,v in case['dimensions'].items():
                     cached=previous.get('dimensions',{}).get(d,{})
                     if cached.get('status')=='scored':
-                        parse_score(json.dumps({d:cached.get('score'),'rationale':cached.get('rationale')}),d)
+                        parse_score(json.dumps({d:cached.get('score'),'rationale':cached.get('rationale'),
+                                              'evidence':cached.get('evidence')}),d,asset_response=profile=='asset')
                         case['dimensions'][d]=cached
                         counts['done']+=1;counts['cached']+=1
             report['results'][positions[case['id']]]=case
@@ -692,7 +703,7 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
                 try:
                     messages=(asset_profile.build_messages(dimension,task,urls['views']) if profile=='asset' else
                               build_messages(dimension,prompts[dimension],task,urls['source'],urls['prediction'],urls['reference']))
-                    result=request_score(dimension,messages,credentials,counted_transport,sleeper)
+                    result=request_score(dimension,messages,credentials,counted_transport,sleeper,asset_response=True) if profile=='asset' else request_score(dimension,messages,credentials,counted_transport,sleeper)
                 except Exception as exc:
                     failed_case(task,exc);return
                 with state_lock:
@@ -704,6 +715,7 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
             applicable=[v['status'] for v in case['dimensions'].values() if v['status']!='not_applicable']
             case['status']='scored' if all(s=='scored' for s in applicable) else 'partial_error' if 'error' in applicable else 'not_scored'
             if profile=='asset':
+                case['consistency_flags']=asset_profile.consistency_flags(case['dimensions'])
                 case['joint_qualified']=(all(case['dimensions'][d]['score']>=4 for d in asset_profile.DIMENSIONS)
                                          if case['status']=='scored' else None)
             if not stop.is_set():counts['cases']+=1
