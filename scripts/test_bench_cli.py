@@ -102,6 +102,21 @@ class BenchCLITests(unittest.TestCase):
         command=self.calls[-1]
         self.assertEqual(command[command.index('--models')+1],','.join(self.models))
 
+    def test_text_prompt_profile_is_forwarded_for_runs_and_external_predictions(self):
+        self.make_protocols()
+        with patch.object(bench,'run_command',side_effect=self.local):
+            self.assertEqual(self.invoke('evaluate','--runs-root',str(self.experiment),
+                                         '--dry-run','--text-profile','texteditbench'),0)
+        judge_commands=[c for c in self.calls if Path(c[1]).name=='mllm_evaluate.py']
+        self.assertTrue(judge_commands)
+        self.assertTrue(all(c[c.index('--text-profile')+1]=='texteditbench' for c in judge_commands))
+        self.calls=[];predictions=self.root/'external';predictions.mkdir()
+        with patch.object(bench,'run_command',side_effect=self.local):
+            self.assertEqual(self.invoke('evaluate','--predictions',str(predictions),
+                '--dataset-root',str(self.dataset),'--dry-run','--text-profile','strict'),0)
+        judge_command=next(c for c in self.calls if Path(c[1]).name=='mllm_evaluate.py')
+        self.assertEqual(judge_command[judge_command.index('--text-profile')+1],'strict')
+
     def test_default_all_uses_registry_default_profile_not_optional_models(self):
         defaults=bench.model_ids()
         with patch.object(bench.model_registry,'DEFAULT_MODELS',tuple(defaults[:1]),create=True):

@@ -36,6 +36,7 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 import asset_judge_profile as asset_profile
+import text_judge_profile as text_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 PROMPT_FILE = Path(__file__).with_name('mllm_prompts.json')
@@ -233,7 +234,7 @@ def request_parameters(config: dict) -> dict:
     return parameters
 
 
-def current_profile_metadata(tasks: list[dict], mode: str = 'no_reference') -> dict:
+def current_profile_metadata(tasks: list[dict], mode: str = 'no_reference', text_prompt_profile: str = 'strict') -> dict:
     """Current judge contract without credentials; shared by artifact validators."""
     if infer_profile(tasks)=='asset':
         if mode!='no_reference':raise JudgeError('Asset judging does not accept a reference target')
@@ -258,6 +259,24 @@ def current_profile_metadata(tasks: list[dict], mode: str = 'no_reference') -> d
             'joint_qualification':{'dimensions':list(asset_profile.DIMENSIONS),'minimum_each':4,
                                    'denominator':'All selected cases, including model-output failures'},
             'API_connectivity_validated_by_dry_run':False}
+    if text_prompt_profile not in ('strict','texteditbench'):
+        raise JudgeError('Unknown text prompt profile')
+    if text_prompt_profile=='strict':
+        if mode not in ('no_reference','reference'):raise JudgeError('Unsupported text judge mode')
+        source=Path(text_profile.__file__).resolve()
+        return {'version':text_profile.VERSION,'profile':'text','text_profile':'strict','mode':mode,
+            'prompts_sha256':canonical_hash(text_profile.PROMPTS),'prompt_source':str(source),
+            'prompt_source_sha256':digest(source.read_bytes()),
+            'message_template_revision':text_profile.MESSAGE_TEMPLATE_REVISION,
+            'user_message_template':'Original instruction and official image/message ordering; strict text system prompts',
+            'criteria':list(STANDARD_DIMENSIONS),'optional_SE':'Only explicit knowledge_prompt',
+            'score_range':[0,5],'temperature':0,'max_tokens_per_criterion':500,
+            'separate_request_per_criterion':True,'independent_case_context':True,
+            'images':'source + prediction ROI' if mode=='no_reference' else 'source + prediction ROI + reference',
+            'image_encoding':'Lossless RGB PNG; padding removed only from in-memory arrays; files unchanged',
+            'operation_mapping':METHODS,'API_failure_scores':'null; never fabricated zero',
+            'aggregate_means':'null unless every applicable expected case has a scored result',
+            'API_connectivity_validated_by_dry_run':False}
     data=json.loads(PROMPT_FILE.read_text())
     if mode not in data['modes']:raise JudgeError('Unsupported text judge mode')
     source=resolve_prompt_source(data['modes'][mode])
@@ -281,7 +300,7 @@ def validate_report_protocol(protocol: dict, tasks: list[dict]) -> bool:
     """Validate profile/prompt/view identity without reading API credentials."""
     if not isinstance(protocol,dict):return False
     try:
-        expected=current_profile_metadata(tasks,protocol.get('mode','no_reference'))
+        expected=current_profile_metadata(tasks,protocol.get('mode','no_reference'),protocol.get('text_profile','texteditbench'))
         for key,value in expected.items():
             if key in ('temperature','max_tokens_per_criterion') and infer_profile(tasks)=='text':
                 # The existing text adapter explicitly supports reasoning_chat.
@@ -602,8 +621,9 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
         raise JudgeError('--workers must be an integer in [1,32]')
     tasks=load_tasks(args.tasks or args.dataset/'tasks.jsonl',args.ids)
     profile=infer_profile(tasks)
-    metadata=current_profile_metadata(tasks,args.mode)
-    prompts=(asset_profile.PROMPTS if profile=='asset'
+    text_prompt_profile=getattr(args,'text_profile','strict')
+    metadata=current_profile_metadata(tasks,args.mode,text_prompt_profile)
+    prompts=(asset_profile.PROMPTS if profile=='asset' else text_profile.PROMPTS if text_prompt_profile=='strict'
              else json.loads(PROMPT_FILE.read_text())['modes'][args.mode]['prompts'])
     credentials=load_credentials(args)
     protocol={**metadata,'judge_model':credentials['model'],'endpoint':credentials['endpoint']}
@@ -769,6 +789,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--ids',help='Comma-separated case IDs; unknown IDs are errors')
     p.add_argument('--mode',choices=('no_reference','reference'),default='no_reference')
+    p.add_argument('--text-profile',choices=('strict','texteditbench'),default='strict',help='Text judge rubric; ignored by the asset track')
     p.add_argument('--config',type=Path,help='User-owned JSON config: base_url, model, api_key_env/api_key_file, timeout, max_retries')
     p.add_argument('--base-url');p.add_argument('--model');p.add_argument('--api-key-env')
     p.add_argument('--timeout',type=float,default=120)

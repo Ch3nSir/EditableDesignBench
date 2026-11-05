@@ -237,6 +237,8 @@ def _judge_comparison_protocol(judge):
         'profile','input_protocol','reference_target_supplied','editing_model_identity_supplied',
         'view_version','view_parameters','joint_qualification')}
     if 'request_parameters' in protocol:value['request_parameters']=protocol['request_parameters']
+    for key in ('text_profile','message_template_revision'):
+        if key in protocol:value[key]=protocol[key]
     return value
 
 

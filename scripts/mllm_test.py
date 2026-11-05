@@ -241,9 +241,9 @@ class AdapterTests(unittest.TestCase):
         def mocked(*args):calls.append(1);return self.success(*args)
         with patch.dict(os.environ,{'MOCK_JUDGE_KEY':'secret'}):
             with patch.object(m,'PROTOCOL_VERSION','texteditbench-mllm-adapter-v1'):
-                m.evaluate(self.args(),mocked,lambda _:None)
+                m.evaluate(self.args('--text-profile','texteditbench'),mocked,lambda _:None)
             self.assertEqual(len(calls),4)
-            report,code=m.evaluate(self.args(),mocked,lambda _:None)
+            report,code=m.evaluate(self.args('--text-profile','texteditbench'),mocked,lambda _:None)
         self.assertEqual(code,0)
         self.assertEqual(len(calls),8)
         self.assertEqual(report['protocol']['version'],'texteditbench-mllm-adapter-v2')

@@ -287,7 +287,7 @@ def evaluation_commands(args,run,dataset,expected):
     if args.config is not None:judge.extend(['--config',str(args.config)])
     if not getattr(args,'resume',True):
         pixel.append('--no-resume');judge.append('--no-resume')
-    judge.extend(['--workers',str(getattr(args,'workers',5))])
+    judge.extend(['--workers',str(getattr(args,'workers',5)),'--text-profile',getattr(args,'text_profile','strict')])
     if not getattr(args,'progress',True):judge.append('--no-progress')
     judge.append('--dry-run' if args.dry_run else '--require-scoring')
     formal=common+[str(SCRIPTS/'formal_report.py'),'--run-dir',str(run),'--dataset-root',str(dataset),'--expected-ids',expected]
@@ -357,7 +357,7 @@ def evaluate_predictions(args):
     if args.config is not None:judge.extend(['--config',str(args.config)])
     if not getattr(args,'resume',True):
         pixel.append('--no-resume');judge.append('--no-resume')
-    judge.extend(['--workers',str(getattr(args,'workers',5))])
+    judge.extend(['--workers',str(getattr(args,'workers',5)),'--text-profile',getattr(args,'text_profile','strict')])
     if not getattr(args,'progress',True):judge.append('--no-progress')
     judge.append('--dry-run' if args.dry_run else '--require-scoring')
     with experiment_lock(output):
@@ -441,6 +441,7 @@ def parser():
     eval_p.add_argument('--dataset-root',type=Path)
     eval_p.add_argument('--track',choices=('text','asset'),help='Select a track for external predictions; generated runs remember their dataset')
     eval_p.add_argument('--models',default='all');eval_p.add_argument('--config',type=Path)
+    eval_p.add_argument('--text-profile',choices=('strict','texteditbench'),default='strict',help='Text rubric; strict by default, texteditbench reproduces the original rubric')
     eval_p.add_argument('--no-resume',action='store_false',dest='resume',help='Force recomputation; default skips validated successful pixel metrics and judge dimensions')
     eval_p.add_argument('--workers',type=int,default=5,help='Concurrent judge cases / maximum simultaneous API requests (1-32; default 5)')
     eval_p.add_argument('--progress',action=argparse.BooleanOptionalAction,default=True,help='Show judge progress (default enabled)')
