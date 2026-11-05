@@ -62,6 +62,7 @@ class DatasetDownloadTests(unittest.TestCase):
         cls.legacy_archive = root / 'legacy.zip'
         cls.combined_archive = root / 'combined.zip'
         cls.bad_combined_archive = root / 'bad-combined.zip'
+        cls.compact_archive = root / 'compact.zip'
         text, assets = track_files(400), track_files(200, asset=True)
         combined = dict(text)
         combined.update({'assets/' + key: value for key, value in assets.items()})
@@ -73,6 +74,16 @@ class DatasetDownloadTests(unittest.TestCase):
             with zipfile.ZipFile(path, 'w') as z:
                 for name, data in files.items():
                     z.writestr('EditableDesignBench/' + name, data)
+        compact = track_files(200)
+        compact.update({'assets/' + key: value for key, value in assets.items()})
+        compact['dataset_index.json'] = json.dumps({
+            'release_version': '3.0.0', 'total_cases': 400, 'default_track': 'text',
+            'tracks': {'text': {'path': '.', 'cases': 200, 'selection_manifest': 'text_subset.json'},
+                       'asset': {'path': 'assets', 'cases': 200}}
+        }).encode()
+        compact['text_subset.json'] = json.dumps({'selected_ids': ['t'+str(i).zfill(3) for i in range(200)]}).encode()
+        with zipfile.ZipFile(cls.compact_archive, 'w') as z:
+            for name, data in compact.items():z.writestr('EditableDesignBench/' + name, data)
         corrupt = dict(combined)
         corrupt['assets/cases/a000/target.png'] = png('RGB', 'green')
         with zipfile.ZipFile(cls.bad_combined_archive, 'w') as z:
@@ -159,6 +170,42 @@ class DatasetDownloadTests(unittest.TestCase):
                 self.assertEqual(main(['--output-dir', str(destination)]), 0)
         download.assert_not_called()
         self.assertEqual(json.loads(printed.getvalue())['cases'], 600)
+
+    def test_full_v2_updates_to_compact_v3_without_leaving_removed_cases(self):
+        destination=self.root/'dataset'
+        install_archive(self.combined_archive,destination)
+        (destination/'old-experiment-note.txt').write_text('keep')
+        backup=self.root/'v2-backup'
+        tasks=install_archive(self.compact_archive,destination,update=True,backup_path=backup)
+        self.assertEqual(len(tasks),200)
+        self.assertEqual(dataset_summary(destination,tasks)['tracks'],{'text':200,'asset':200})
+        self.assertEqual(dataset_summary(destination,tasks)['cases'],400)
+        self.assertFalse((destination/'cases/t399').exists())
+        self.assertEqual(len(validate_dataset(backup)),400)
+        self.assertEqual((backup/'old-experiment-note.txt').read_text(),'keep')
+        self.assertEqual((backup/'assets/cases/a199/target.png').read_bytes(),
+                         (destination/'assets/cases/a199/target.png').read_bytes())
+
+    def test_compact_selection_manifest_cannot_disagree_with_payload(self):
+        destination=self.root/'dataset';install_archive(self.compact_archive,destination)
+        (destination/'text_subset.json').write_text(json.dumps({'selected_ids':['wrong']*200}))
+        with self.assertRaisesRegex(ValueError,'selection and tasks differ'):
+            validate_dataset(destination)
+
+    def test_compact_release_cannot_silently_drop_source_design_coverage(self):
+        destination=self.root/'dataset';install_archive(self.compact_archive,destination)
+        p=destination/'tasks.jsonl';tasks=[json.loads(l) for l in p.read_text().splitlines()]
+        tasks[1]['source_id']=tasks[0]['source_id']
+        p.write_text(''.join(json.dumps(t)+'\n' for t in tasks))
+        with self.assertRaisesRegex(ValueError,'one task from each'):
+            validate_dataset(destination)
+
+    def test_compact_collection_total_is_verified(self):
+        destination=self.root/'dataset';install_archive(self.compact_archive,destination)
+        p=destination/'dataset_index.json';index=json.loads(p.read_text());index['total_cases']=600
+        p.write_text(json.dumps(index))
+        with self.assertRaisesRegex(ValueError,'Collection total'):
+            validate_dataset(destination)
 
     def test_bad_asset_checksum_never_replaces_existing_data(self):
         destination = self.root / 'dataset'

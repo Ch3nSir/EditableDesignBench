@@ -115,26 +115,34 @@ def _validate_track(root, expected, *, asset=False):
 
 
 def validate_dataset(root):
-    """Validate release files without original HTML or construction audits.
-
-    Return the 400 default text tasks for existing callers. A collection index
-    additionally requires the complete 200-task asset track.
-    """
+    """Validate current text200/asset200 and historical 400-text releases."""
     root = Path(root).resolve()
-    text_tasks = _validate_track(root, 400)
     index_path = root / 'dataset_index.json'
     if not index_path.exists():
         if (root / 'assets').exists():
             raise ValueError('Asset directory requires the collection dataset_index.json')
-        return text_tasks
+        return _validate_track(root, 400)
     index = json.loads(index_path.read_text())
     tracks = index.get('tracks', {})
-    if set(tracks) != {'text', 'asset'} or index.get('total_cases') != 600 or index.get('default_track') != 'text':
+    if set(tracks) != {'text', 'asset'} or index.get('default_track') != 'text':
         raise ValueError('Unsupported or incomplete dataset collection index')
-    if tracks['text'].get('path') != '.' or tracks['text'].get('cases') != 400:
-        raise ValueError('The default text track must preserve the legacy 400-task root')
+    text_count = tracks['text'].get('cases')
+    if type(text_count) is not int or text_count not in (200, 400) or tracks['text'].get('path') != '.':
+        raise ValueError('The text track must contain 200 current or 400 historical tasks at the root')
     if tracks['asset'].get('path') != 'assets' or tracks['asset'].get('cases') != 200:
         raise ValueError('The asset track must contain 200 tasks under assets/')
+    if index.get('total_cases') != text_count + 200:
+        raise ValueError('Collection total differs from its complete tracks')
+    text_tasks = _validate_track(root, text_count)
+    if text_count == 200:
+        if len({task.get('source_id') for task in text_tasks}) != 200:
+            raise ValueError('Compact text track requires one task from each of 200 source designs')
+        selection_path = tracks['text'].get('selection_manifest')
+        if selection_path:
+            selection = json.loads(_file(root, selection_path).read_text())
+            selected = selection.get('selected_ids', [])
+            if len(selected) != 200 or set(selected) != {t['id'] for t in text_tasks}:
+                raise ValueError('Text subset selection and tasks differ')
     asset_root = root / _relative(tracks['asset']['path'])
     if not asset_root.is_dir() or asset_root.is_symlink():
         raise ValueError('Missing or unsafe asset-track directory')
@@ -150,7 +158,7 @@ def dataset_summary(root, text_tasks):
         return {'cases': len(text_tasks), 'tracks': {'text': len(text_tasks)}, 'release_format': 'legacy-400'}
     data = json.loads(index.read_text())
     return {'cases': data['total_cases'], 'tracks': {k: v['cases'] for k, v in data['tracks'].items()},
-            'release_version': data.get('release_version'), 'release_format': 'text-and-asset-600'}
+            'release_version': data.get('release_version'), 'release_format': 'text-and-asset-' + str(data['total_cases'])}
 
 
 def _backup_path(destination):

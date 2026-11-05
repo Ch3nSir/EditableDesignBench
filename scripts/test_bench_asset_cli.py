@@ -11,6 +11,27 @@ import bench
 
 
 class BenchAssetCLITests(unittest.TestCase):
+    def test_smoke_selects_existing_ids_from_each_current_track(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp);data=base/'data';(data/'assets').mkdir(parents=True)
+            for track in ('text','asset'):
+                folder=data if track=='text' else data/'assets'
+                rows=[{'id':f'{track}_{i}','source_id':str(i),'operation':('delete','insert','move','scale','replace')[i%5],
+                       'image':f'cases/{track}_{i}/source.png','instruction':'Edit the item.'} for i in range(30)]
+                if track=='asset':
+                    for row in rows:row['input_protocol']='asset-edit-single-source-v1'
+                (folder/'tasks.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+                out=base/track
+                with patch.object(bench,'run_command',return_value=0),contextlib.redirect_stdout(io.StringIO()):
+                    code=bench.main(['generate','--models','qwen-image21','--dataset-root',str(data),
+                                     '--track',track,'--smoke','--preflight','--output-root',str(out)])
+                self.assertEqual(code,0)
+                plan=json.loads((out/'experiment.json').read_text())
+                self.assertEqual(len(plan['case_ids']),7)
+                self.assertTrue(set(plan['case_ids'])<={r['id'] for r in rows})
+                self.assertEqual(plan['sampling']['count'],7)
+                self.assertEqual(plan['sampling']['seed'],42)
+
     def test_track_sample_and_automatic_evaluation_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
             base=Path(tmp);data=base/'data';assets=data/'assets';assets.mkdir(parents=True)

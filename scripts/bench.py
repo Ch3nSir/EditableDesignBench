@@ -117,18 +117,16 @@ def _safe_path(path):
 
 def plan_experiment(args):
     root=_safe_path(args.output_root);dataset=resolve_track_root(args.dataset_root,getattr(args,'track',None))
-    if args.smoke:
-        ids=(SCRIPTS/'smoke_cases.txt').read_text().strip()
-        tasks=select_tasks(dataset,ids)
-    elif getattr(args,'sample',None) is not None:
+    if args.smoke or getattr(args,'sample',None) is not None:
         from sampling import sample_tasks
-        tasks=sample_tasks(select_tasks(dataset,None,True),args.sample,args.sample_seed)
+        count=7 if args.smoke else args.sample
+        tasks=sample_tasks(select_tasks(dataset,None,True),count,args.sample_seed)
     else:tasks=select_tasks(dataset,args.ids,args.all)
     selected=model_ids(args.models)
     experiment={'schema_version':1,'dataset_root':str(dataset),'case_ids':[task['id'] for task in tasks],
                 'run_id':args.run_id or root.name,'models':selected,'resolution_protocol':'native-pad32-v1'}
-    if getattr(args,'sample',None) is not None:
-        experiment['sampling']={'method':'operation-stratified-source-diverse-v1','count':args.sample,'seed':args.sample_seed}
+    if args.smoke or getattr(args,'sample',None) is not None:
+        experiment['sampling']={'method':'operation-stratified-source-diverse-v1','count':count,'seed':args.sample_seed}
     if not experiment['run_id'].strip():raise ValueError('Run ID cannot be empty')
     path=root/'experiment.json';previous=read_json(path)
     if previous is not None:

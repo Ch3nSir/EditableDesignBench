@@ -1,1 +1,0 @@
-000_delete,000_insert,008_replace,001_scale,002_color,248_move,310_move

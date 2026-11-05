@@ -2,12 +2,14 @@
 
 [数据集](https://huggingface.co/datasets/yomi-chen/EditableDesignBench) · [模型与进阶用法](docs/advanced.md) · [TextEditBench](https://github.com/CSU-JPG/TextEditBench)
 
-面向设计图片的编辑评测集，共 **600 个任务**。模型输入为原图和自然语言指令；目标图和 mask 仅用于评测。
+面向设计图片的编辑评测集，共 **400 个任务**。模型输入为原图和自然语言指令；目标图和 mask 仅用于评测。
 
 | 轨道 | 任务数 | 编辑操作 |
 |---|---:|---|
-| 文字（默认） | 400 | 删除、插入、替换、移动、缩放、改色 |
+| 文字（默认） | 200 | 删除、插入、替换、移动、缩放、改色 |
 | 图片资产 | 200 | 删除、插入、替换、移动、缩放 |
+
+文字集保留 200 个原始设计，每个设计 1 条任务，六种操作各 33–34 条。
 
 下面先用 Qwen-Image-2.1 跑通两轨各 20 例，再计算像素指标和 MLLM 分数。已有模型输出时可直接[评分自己的图片](#已有图片)。
 
@@ -37,7 +39,7 @@ python -m pip install -r requirements.txt
 python scripts/download_dataset.py
 ```
 
-自动下载、解压到 `data/EditableDesignBench/`，其中根目录是文字集，`assets/` 是资产集。无需登录。更新旧数据时添加 `--update`。
+自动下载、解压到 `data/EditableDesignBench-v3/`，其中根目录是文字集，`assets/` 是资产集。无需登录。新版使用独立目录，保留已有 400 条文字任务及其旧实验；更新当前目录的数据时添加 `--update`。
 
 ## 3. 生成图片
 
@@ -52,7 +54,7 @@ python scripts/bench.py generate --models qwen-image21 --sample 20 --output-root
 python scripts/bench.py generate --models qwen-image21 --track asset --sample 20 --output-root outputs/asset20
 ```
 
-将 `--sample 20` 换成 `--all` 即可分别生成全部 400 / 200 例。默认抽样种子为 42，按操作分层并优先选择不同原始设计。
+将 `--sample 20` 换成 `--all` 即可运行所选轨道的全部 200 例。默认抽样种子为 42，按操作分层并优先选择不同原始设计。
 
 替换 `--models` 即可使用其他[内置模型或自定义模型](docs/advanced.md#模型选择)；多个模型用逗号分隔。权重保存在 `models/`。受限模型需先在 Hugging Face 接受访问条件，再运行 `hf auth login`。
 
@@ -81,7 +83,7 @@ python scripts/bench.py evaluate --runs-root outputs/asset20 --workers 10 --devi
 python scripts/bench.py evaluate --predictions predictions/MyModel --workers 10 --device cpu
 ```
 
-默认评分文字集全部 400 例；资产集添加 `--track asset`，子集用 `--ids ID1,ID2` 指定。结果保存在 `results/MyModel/`，也支持 `--pixel-only`。
+默认评分文字集全部 200 例；资产集添加 `--track asset`，子集用 `--ids ID1,ID2` 指定。结果保存在 `results/MyModel/`，也支持 `--pixel-only`。
 
 ## 查看结果
 

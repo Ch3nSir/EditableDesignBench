@@ -128,9 +128,9 @@ python scripts/bench.py compare --runs-root outputs/custom_smoke --models all
 
 ## 文字与资产轨
 
-文字任务来自 200 个原始设计，资产任务来自其中 34 个设计的 40 个资产单元。
+文字集从原 400 条任务中，按固定种子 42、操作分层和来源设计匹配选出 200 条，每个原始设计保留 1 条；五种设计类型各 40 条，六种操作各 33–34 条。筛选不使用模型得分，原有指令、PNG、mask 和标注不修改。资产集仍来自其中 34 个设计的 40 个资产单元。
 
-下载器同时安装 400 条文字任务（数据根目录）和 200 条资产任务（`assets/`）。生成或评分外部图片时，用 `--track asset` 选择资产；`--dataset-root` 仍支持直接指定任意一条轨道的目录。生成实验会记录轨道与任务名单，后续评分自动读取。两轨使用不同提示词、掩码约定和缓存身份，分别汇报分数。
+下载器同时安装 200 条文字任务（数据根目录）和 200 条资产任务（`assets/`）。生成或评分外部图片时，用 `--track asset` 选择资产；`--dataset-root` 仍支持直接指定任意一条轨道的目录。生成实验会记录轨道与任务名单，后续评分自动读取。两轨使用不同提示词、掩码约定和缓存身份，分别汇报分数。
 
 资产评委每次只接收两张原生尺寸整图（原图、模型结果），以及原始指令和操作类型。不裁取或放大局部，不读取 mask、参考目标或生成素材。mask 继续用于像素指标。
 
@@ -168,9 +168,11 @@ python scripts/bench.py compare --runs-root outputs/custom_smoke --models all
 
 像素公式仍复用 TextEditBench。资产轨将背景排除区域设为 `references.jsonl` 的 `pixel_preservation_mask`（`allowed_edit_mask.png`）。资产语义提示词与联合合格率属于本项目扩展协议，文字与资产分数分别报告。划分数据或估计置信区间时按 `source_id` 分组，同一设计的衍生任务保持在同组。
 
+旧版 400 条文字任务通过 Hugging Face 的 `text400-v2` 版本标签保留。新版下载默认使用 `data/EditableDesignBench-v3/`，避免改变已有实验记录的旧数据目录。需要旧版时，可运行 `python scripts/download_dataset.py --revision text400-v2 --output-dir data/EditableDesignBench-text400`，并为新建旧版实验显式指定这个数据目录；现有旧实验仍沿用其记录的原目录。新旧文字任务数不同，分数应分别报告。
+
 ## API 与请求参数
 
-默认沿用 TextEditBench 的 `temperature=0`、`max_tokens=500`。四个维度分别独立请求。完整文字集为 1,600 次请求，完整资产集为 800 次，不含重试。
+默认沿用 TextEditBench 的 `temperature=0`、`max_tokens=500`。四个维度分别独立请求。完整文字集为 800 次请求，完整资产集为 800 次，不含重试。
 
 每个评测进程默认并发处理 5 个 case，每个 case 内的维度依次请求，同时进行的 API 请求不超过 5 个。用 `--workers 10` 改为 10 并发，`--workers 1` 使用串行。`bench.py evaluate` 和 `mllm_evaluate.py` 都支持此参数。
 
@@ -193,7 +195,7 @@ python scripts/mllm_evaluate.py \
 
 ## 路径与输出尺寸
 
-默认数据在 `data/EditableDesignBench/`，权重在 `models/`；可用 `EDITABLEDESIGNBENCH_DATASET_ROOT`、`EDITABLEDESIGNBENCH_MODEL_ROOT` 环境变量修改。
+默认数据在 `data/EditableDesignBench-v3/`，权重在 `models/`；可用 `EDITABLEDESIGNBENCH_DATASET_ROOT`、`EDITABLEDESIGNBENCH_MODEL_ROOT` 环境变量修改。
 
 生成器只读取原图和指令，不读取目标图或 mask。原图只在右侧和底部补边到 32 的倍数。模型原始返回图完整保留，评测时在内存中去掉额外补边。直接提交的预测图须为原生尺寸 RGB PNG，不能将带补边图片当作原生尺寸图片提交。
 
@@ -201,7 +203,7 @@ RGBA 输出接受任意 Alpha 值，Alpha 仅用于诊断记录。评测输入�
 
 ## 子集、续跑与汇总
 
-首次测试可使用 `generate --sample 20`，默认种子为 42，按操作分层并优先选择不同原始设计；也可用 `--ids 000_delete` 指定任务。生成后评分自动使用记录的同一组任务。为其他模型图片评分时，用 `evaluate --predictions predictions/MyModel --ids 000_delete` 指定子集；资产图片添加 `--track asset`。默认评测整条轨道：文字 400 例、资产 200 例。
+首次测试可使用 `generate --sample 20`；`--smoke` 则从所选轨道抽取 7 例。默认种子为 42，按操作分层并优先选择不同原始设计；也可用 `--ids 000_delete` 指定任务。生成后评分自动使用记录的同一组任务。为其他模型图片评分时，用 `evaluate --predictions predictions/MyModel --ids 000_delete` 指定子集；资产图片添加 `--track asset`。默认评测整条轨道：文字 200 例、资产 200 例。
 
 同一实验可以续跑，成功图片和匹配的评分会复用；修改任务集合、权重或生成参数后使用新的输出目录。
 
