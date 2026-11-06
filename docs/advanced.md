@@ -138,6 +138,8 @@ python scripts/bench.py compare --runs-root outputs/custom_smoke --models all
 
 资产评委每次只接收两张原生尺寸整图（原图、模型结果），以及原始指令和操作类型。不裁取或放大局部，不读取 mask、参考目标或生成素材。mask 继续用于像素指标。
 
+资产响应只检查 JSON、0–5 分数和必需证据字段的格式。`target_match`、`operation` 与分数矛盾，或四次独立请求的观察不同，都只产生复核标记；原始分数正常参与均值及联合合格率，不拒收、不调整分数、不因此重试。网络/API 或无法解析的响应仍会重试。响应校验策略为 `asset-response-structure-only-v1`，记录在报告的 `response_validation` 中，与评分 prompt 的版本分开。
+
 资产 MLLM 协议为 `editabledesignbench-asset-mllm-v4`。本版仅收紧资产评委 prompt 的评分锚点；输入、输出结构、解析与重试机制不变。旧版分数与新版分开缓存；重跑原命令会重新计算资产 MLLM 分数，并保留历史缓存。文字评委采用上述独立严格版协议，像素指标未改变。
 
 | 资产维度 | 判断内容 |

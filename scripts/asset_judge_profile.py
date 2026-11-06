@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+import asset_response_validation as response_validation
 
 INPUT_PROTOCOL = 'asset-edit-single-source-v1'
 VERSION = 'editabledesignbench-asset-mllm-v4'
@@ -195,48 +196,14 @@ def build_messages(dimension: str, task: dict, urls: list[str]) -> list[dict]:
     return [{'role': 'system', 'content': PROMPTS[dimension]}, {'role': 'user', 'content': content}]
 
 
-EVIDENCE_SCHEMA = {'text_fields': ['source', 'candidate', 'change'],
-                   'target_match': ['yes', 'no', 'uncertain'],
-                   'operation': ['done', 'partial', 'not_done', 'wrong', 'uncertain'],
-                   'defects': 'list of nonempty strings'}
+EVIDENCE_SCHEMA = response_validation.EVIDENCE_SCHEMA
 
 
 def validate_evidence(data: dict, dimension: str) -> dict:
-    """Check response structure and self-consistency; never rewrite a score."""
-    evidence = data.get('evidence')
-    if not isinstance(evidence, dict):
-        raise ValueError('Asset judge response requires evidence')
-    for field in EVIDENCE_SCHEMA['text_fields']:
-        if not isinstance(evidence.get(field), str) or not evidence[field].strip():
-            raise ValueError('Asset evidence requires nonempty ' + field)
-    for field in ('target_match', 'operation'):
-        if evidence.get(field) not in EVIDENCE_SCHEMA[field]:
-            raise ValueError('Invalid asset evidence ' + field)
-    defects = evidence.get('defects')
-    if not isinstance(defects, list) or any(not isinstance(x, str) or not x.strip() for x in defects):
-        raise ValueError('Asset evidence defects must be a list of nonempty strings')
-    score = data[dimension]
-    if dimension in ('IF', 'OA') and evidence['target_match'] == 'no' and score > 1:
-        raise ValueError('Asset score contradicts declared wrong target')
-    if dimension in ('IF', 'OA') and evidence['target_match'] == 'uncertain' and score >= 4:
-        raise ValueError('High asset score requires a verified target')
-    if dimension == 'IF':
-        if evidence['operation'] in ('wrong', 'not_done') and score > 1:
-            raise ValueError('IF score contradicts declared operation failure')
-        if evidence['operation'] in ('partial', 'uncertain') and score >= 4:
-            raise ValueError('High IF score requires a completed operation')
-    return {field: evidence[field] for field in (*EVIDENCE_SCHEMA['text_fields'], 'target_match', 'operation', 'defects')}
+    """Validate structure only; score/evidence disagreement does not reject a result."""
+    return response_validation.validate_evidence(data, dimension)
 
 
 def consistency_flags(dimensions: dict) -> list[str]:
-    """Flag conflicting factual claims across independent calls without changing scores."""
-    observations = [v['evidence'] for v in dimensions.values()
-                    if v.get('status') == 'scored' and isinstance(v.get('evidence'), dict)]
-    targets = {e['target_match'] for e in observations}
-    operations = {e['operation'] for e in observations}
-    flags = []
-    if {'yes', 'no'} <= targets and operations - {'not_done', 'uncertain'}:
-        flags.append('conflicting_target_match')
-    if 'done' in operations and operations & {'not_done', 'wrong'}:
-        flags.append('conflicting_operation_status')
-    return flags
+    """Report disagreements without rejecting, correcting, or rescaling the score."""
+    return response_validation.consistency_flags(dimensions)

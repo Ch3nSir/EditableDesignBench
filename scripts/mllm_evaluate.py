@@ -36,6 +36,7 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 import asset_judge_profile as asset_profile
+import asset_response_validation as asset_validation
 import text_judge_profile as text_profile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -409,7 +410,7 @@ def parse_score(content, dimension: str, *, asset_response: bool = False) -> dic
     if not isinstance(rationale,str) or not rationale.strip():raise JudgeError('Judge JSON is missing rationale')
     result={dimension:value,'rationale':rationale}
     if asset_response:
-        try:result['evidence']=asset_profile.validate_evidence(data,dimension)
+        try:result['evidence']=asset_validation.validate_evidence(data,dimension)
         except ValueError as exc:raise JudgeError(str(exc)) from exc
     return result
 
@@ -586,8 +587,8 @@ def summarize_assets(records: list[dict]) -> dict:
                                    'rate':qualified/expected if ready and expected else None,
                                    'model_failures_count_as_unqualified':True}}
     result=group(records)
-    result['consistency_review']={'cases':sum(bool(asset_profile.consistency_flags(row.get('dimensions',{}))) for row in records),
-                                  'case_ids':[row['id'] for row in records if asset_profile.consistency_flags(row.get('dimensions',{}))],
+    result['consistency_review']={'cases':sum(bool(asset_validation.consistency_flags(row.get('dimensions',{}))) for row in records),
+                                  'case_ids':[row['id'] for row in records if asset_validation.consistency_flags(row.get('dimensions',{}))],
                                   'scores_adjusted':False}
     result['by_operation']={operation:group([row for row in records if row['operation']==operation])
                             for operation in asset_profile.METHODS}
@@ -659,6 +660,14 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
         print(f'MLLM resume: {available} successful cached dimensions found; validating inputs before reuse.',file=sys.stderr,flush=True)
     total_dimensions=sum(len(dimensions_for_task(task,profile)) for task in tasks)
     report['execution']={'workers':workers,'concurrency_unit':'case','maximum_simultaneous_api_requests':workers}
+    if profile=='asset':
+        validation_source=Path(asset_validation.__file__).resolve()
+        # Local acceptance/audit policy is separate from the API request identity.
+        # Changing it does not require paying again for already-valid responses.
+        report['response_validation']={'version':asset_validation.VERSION,
+            'source':str(validation_source),'source_sha256':digest(validation_source.read_bytes()),
+            'semantic_disagreements':'review_only','scores_modified':False,
+            'retry_on_semantic_disagreement':False}
     def counted_transport(*values):
         with state_lock:
             if stop.is_set():raise JudgeError('Evaluation interrupted')
@@ -735,7 +744,7 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
             applicable=[v['status'] for v in case['dimensions'].values() if v['status']!='not_applicable']
             case['status']='scored' if all(s=='scored' for s in applicable) else 'partial_error' if 'error' in applicable else 'not_scored'
             if profile=='asset':
-                case['consistency_flags']=asset_profile.consistency_flags(case['dimensions'])
+                case['consistency_flags']=asset_validation.consistency_flags(case['dimensions'])
                 case['joint_qualified']=(all(case['dimensions'][d]['score']>=4 for d in asset_profile.DIMENSIONS)
                                          if case['status']=='scored' else None)
             if not stop.is_set():counts['cases']+=1

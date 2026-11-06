@@ -75,7 +75,7 @@ class AssetJudgeTests(unittest.TestCase):
         self.assertTrue(all(v['score'] is None for v in report['results'][0]['dimensions'].values()))
         self.assertEqual(report['results'][0]['dimensions']['IF']['error'],'Asset judge response requires evidence')
 
-    def test_self_contradictory_response_retries_without_altering_provider_score(self):
+    def test_self_contradictory_response_is_accepted_once_with_original_score(self):
         args=self.args('--ids',self.tasks[0]['id'],'--max-retries','1')
         attempts={d:0 for d in asset.DIMENSIONS}
         def transport(e,k,p,t):
@@ -87,9 +87,57 @@ class AssetJudgeTests(unittest.TestCase):
             result['choices'][0]['message']['content']=json.dumps(data)
             return result
         report,code=judge.evaluate(args,transport=transport,sleeper=lambda _:None)
-        self.assertEqual(code,0);self.assertEqual(report['api_calls_made'],5)
-        self.assertEqual(report['results'][0]['dimensions']['IF']['score'],4)
-        self.assertEqual(report['results'][0]['dimensions']['IF']['attempts'],2)
+        self.assertEqual(code,0);self.assertEqual(report['api_calls_made'],4)
+        self.assertEqual(report['results'][0]['dimensions']['IF']['score'],5)
+        self.assertEqual(report['results'][0]['dimensions']['IF']['attempts'],1)
+        self.assertIn('IF_score_target_disagreement',report['results'][0]['consistency_flags'])
+        self.assertEqual(report['summary']['consistency_review']['cases'],1)
+        self.assertFalse(report['response_validation']['retry_on_semantic_disagreement'])
+
+    def test_every_previous_semantic_rejection_is_review_only(self):
+        evidence={'source':'Original vase.','candidate':'Same vase.','change':'No movement.',
+                  'target_match':'yes','operation':'done','defects':[]}
+        for dimension,score,changes,flag in [
+            ('IF',5,{'target_match':'no'},'IF_score_target_disagreement'),
+            ('OA',3,{'target_match':'no'},'OA_score_target_disagreement'),
+            ('IF',4,{'target_match':'uncertain'},'IF_high_score_uncertain_target'),
+            ('OA',5,{'target_match':'uncertain'},'OA_high_score_uncertain_target'),
+            ('IF',2,{'operation':'not_done'},'IF_score_operation_disagreement'),
+            ('IF',5,{'operation':'wrong'},'IF_score_operation_disagreement'),
+            ('IF',4,{'operation':'partial'},'IF_high_score_incomplete_operation'),
+            ('IF',4,{'operation':'uncertain'},'IF_high_score_incomplete_operation')]:
+            with self.subTest(dimension=dimension,changes=changes):
+                payload={dimension:score,'rationale':'Visible result.','evidence':dict(evidence,**changes)}
+                parsed=judge.parse_score(json.dumps(payload),dimension,asset_response=True)
+                self.assertEqual(parsed[dimension],score)
+                flags=asset.consistency_flags({dimension:{'status':'scored','score':score,'evidence':parsed['evidence']}})
+                self.assertIn(flag,flags)
+
+    def test_old_successes_are_reused_when_retrying_a_previously_rejected_dimension(self):
+        args=self.args('--ids',self.tasks[0]['id'])
+        def response(e,k,p,t):
+            result=self.success(e,k,p,t);d=self.dimension(p)
+            if d=='IF':
+                data=json.loads(result['choices'][0]['message']['content'])
+                data['IF']=5;data['evidence']['target_match']='no'
+                result['choices'][0]['message']['content']=json.dumps(data)
+            return result
+        real_validate=judge.asset_validation.validate_evidence
+        def legacy_validate(data,dimension):
+            evidence=real_validate(data,dimension)
+            if dimension=='IF' and evidence['target_match']=='no' and data[dimension]>1:
+                raise ValueError('Legacy semantic rejection')
+            return evidence
+        with patch.object(judge.asset_validation,'validate_evidence',side_effect=legacy_validate):
+            before,code=judge.evaluate(args,transport=response)
+        self.assertEqual(code,1)
+        after,code=judge.evaluate(args,transport=response)
+        self.assertEqual(code,0);self.assertEqual(after['api_calls_made'],1)
+        self.assertEqual(after['resume']['cached_dimensions'],3)
+        self.assertEqual(before['results'][0]['fingerprint'],after['results'][0]['fingerprint'])
+        for dimension in ('OA','VC','LP'):
+            self.assertEqual(before['results'][0]['dimensions'][dimension],after['results'][0]['dimensions'][dimension])
+        self.assertEqual(after['results'][0]['dimensions']['IF']['score'],5)
 
     def test_independent_axes_and_conflicting_observations_are_audited_without_score_changes(self):
         payload={'OA':5,'rationale':'Identity is intact despite no movement.',
@@ -97,8 +145,7 @@ class AssetJudgeTests(unittest.TestCase):
                              'target_match':'yes','operation':'not_done','defects':[]}}
         self.assertEqual(judge.parse_score(json.dumps(payload),'OA',asset_response=True)['OA'],5)
         payload['IF']=5
-        with self.assertRaisesRegex(judge.JudgeError,'operation failure'):
-            judge.parse_score(json.dumps(payload),'IF',asset_response=True)
+        self.assertEqual(judge.parse_score(json.dumps(payload),'IF',asset_response=True)['IF'],5)
         del payload['IF']
         dimensions={'OA':{'status':'scored','score':5,'evidence':payload['evidence']},
                     'IF':{'status':'scored','score':0,'evidence':dict(payload['evidence'],target_match='no',operation='wrong')},
