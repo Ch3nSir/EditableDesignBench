@@ -142,51 +142,87 @@ def output_lock(output: Path):
         finally:fcntl.flock(stream,fcntl.LOCK_UN)
 
 
-def merge_cached_scores(cache: dict, records: list[dict]) -> None:
+def merge_cached_scores(cache: dict, records: list[dict], *, diagnostics: list | None = None,
+                        source: str | None = None, section: str = 'records') -> None:
     """Keep only validated paid dimensions; unavailable inputs never erase them."""
-    if not isinstance(records,list):raise JudgeError('Invalid cached records list')
-    for record in records:
-        if not isinstance(record,dict):raise JudgeError('Invalid cached record')
-        fingerprint=record.get('fingerprint')
-        if not fingerprint:continue  # Pending/error placeholders have no scores.
-        if not isinstance(record.get('id'),str) or not isinstance(fingerprint,str) or not re.fullmatch('[0-9a-f]{64}',fingerprint):
-            raise JudgeError('Invalid cached case identity')
-        dimensions=record.get('dimensions',{})
-        if not isinstance(dimensions,dict):raise JudgeError('Invalid cached dimensions')
-        scored={}
-        for dimension,value in dimensions.items():
-            if not isinstance(value,dict):raise JudgeError('Invalid cached dimension')
-            if value.get('status')!='scored':continue
+    def rejected(error, **location):
+        if diagnostics is None:raise JudgeError(error)
+        diagnostics.append({'source':source,'section':section,**location,'error':error})
+    if not isinstance(records,list):
+        rejected('Invalid cached records list');return
+    for index,record in enumerate(records):
+        try:
+            if not isinstance(record,dict):raise JudgeError('Invalid cached record')
+            fingerprint=record.get('fingerprint')
+            if not fingerprint:continue  # Pending/error placeholders have no scores.
+            if not isinstance(record.get('id'),str) or not isinstance(fingerprint,str) or not re.fullmatch('[0-9a-f]{64}',fingerprint):
+                raise JudgeError('Invalid cached case identity')
+            dimensions=record.get('dimensions',{})
+            if not isinstance(dimensions,dict):raise JudgeError('Invalid cached dimensions')
             profile=record.get('judge_profile','text')
             if profile not in ('text','asset'):raise JudgeError('Unknown cached judge profile')
-            allowed=asset_profile.DIMENSIONS if profile=='asset' else (*STANDARD_DIMENSIONS,'SE')
-            if dimension not in allowed:raise JudgeError('Unknown cached score dimension')
-            parse_score(json.dumps({dimension:value.get('score'),'rationale':value.get('rationale')}),dimension)
-            scored[dimension]=dict(value)
+        except JudgeError as exc:
+            rejected(str(exc),record_index=index);continue
+        scored={}
+        for dimension,value in dimensions.items():
+            try:
+                if not isinstance(value,dict):raise JudgeError('Invalid cached dimension')
+                if value.get('status')!='scored':continue
+                allowed=asset_profile.DIMENSIONS if profile=='asset' else (*STANDARD_DIMENSIONS,'SE')
+                if dimension not in allowed:raise JudgeError('Unknown cached score dimension')
+                parsed=parse_score(json.dumps({dimension:value.get('score'),'rationale':value.get('rationale'),
+                                               'evidence':value.get('evidence')}),dimension,asset_response=profile=='asset')
+                scored[dimension]=dict(value,rationale=parsed['rationale'])
+                if profile=='asset':
+                    scored[dimension]['evidence']=parsed['evidence']
+                if parsed.get('response_diagnostics'):
+                    previous=value.get('response_diagnostics',[])
+                    if not isinstance(previous,list):previous=[]
+                    scored[dimension]['response_diagnostics']=list(dict.fromkeys(
+                        [*(item for item in previous if isinstance(item,str)),*parsed['response_diagnostics']]))
+            except JudgeError as exc:
+                rejected(str(exc),record_index=index,dimension=dimension)
         if not scored:continue
         key=(record['id'],fingerprint)
         if key not in cache:cache[key]=dict(record,dimensions={})
         cache[key]['dimensions'].update(scored)
 
 
-def load_score_cache(output: Path) -> dict:
-    """Import the legacy in-report cache and the persistent sidecar safely."""
-    cache={}
+def load_score_cache(output: Path, *, diagnostics: list | None = None) -> dict:
+    """Recover independently validated scores from each report/cache source."""
+    cache={};issues=diagnostics if diagnostics is not None else []
     sidecar=cache_path(output)
-    if output.exists():
-        saved=json.loads(output.read_text())
-        if not isinstance(saved,dict) or not isinstance(saved.get('results'),list):
-            raise JudgeError('Invalid existing evaluation report; restore its backup before continuing')
-        merge_cached_scores(cache,saved.get('_resume_cache',[]))
-        merge_cached_scores(cache,saved['results'])
     # The sidecar is committed first, so it may contain a newer paid response
     # than an interrupted report write. It must win duplicate dimensions.
-    if sidecar.exists():
-        saved=json.loads(sidecar.read_text())
-        if not isinstance(saved,dict) or saved.get('schema_version')!=CACHE_SCHEMA_VERSION:
-            raise JudgeError('Unsupported or invalid score cache schema')
-        merge_cached_scores(cache,saved.get('records'))
+    for path,is_sidecar in ((output,False),(sidecar,True)):
+        if not path.exists():continue
+        try:saved=json.loads(path.read_text())
+        except (ValueError,UnicodeError):
+            issues.append({'source':str(path),'error':'Invalid JSON in score cache source'});continue
+        if not isinstance(saved,dict):
+            issues.append({'source':str(path),'error':'Score cache source must be an object'});continue
+        if is_sidecar and saved.get('schema_version')!=CACHE_SCHEMA_VERSION:
+            issues.append({'source':str(path),'error':'Unsupported or invalid score cache schema'});continue
+        sections=('records',) if is_sidecar else ('_resume_cache','results')
+        for section in sections:
+            records=saved.get(section,[] if section=='_resume_cache' else None)
+            merge_cached_scores(cache,records,diagnostics=issues,source=str(path),section=section)
+    if diagnostics is None and issues:
+        print(f'MLLM cache recovery: ignored {len(issues)} invalid cache entries; original files remain unchanged.',file=sys.stderr)
     return cache
+
+
+def preserve_cache_recovery_sources(diagnostics: list) -> None:
+    """Keep damaged input bytes across later checkpoints and repeated resumes."""
+    preserved={}
+    for issue in diagnostics:
+        source=issue['source']
+        if source not in preserved:
+            path=Path(source);content=path.read_bytes()
+            target=path.with_name(path.name+'.rejected-'+digest(content)+'.bak')
+            if not target.exists():write_bytes(target,content)
+            preserved[source]=str(target)
+        issue['preserved_file']=preserved[source]
 
 
 def backup_existing(path: Path) -> None:
@@ -303,14 +339,15 @@ def validate_report_protocol(protocol: dict, tasks: list[dict]) -> bool:
     try:
         expected=current_profile_metadata(tasks,protocol.get('mode','no_reference'),protocol.get('text_profile','texteditbench'))
         for key,value in expected.items():
-            if key in ('temperature','max_tokens_per_criterion') and infer_profile(tasks)=='text':
-                # The existing text adapter explicitly supports reasoning_chat.
+            if key in ('temperature','max_tokens_per_criterion'):
+                # Explicit alternate API parameters are validated below for
+                # either track; prompt/view/rubric identity remains unchanged.
                 if 'request_parameters' in protocol:continue
             if protocol.get(key)!=value:return False
         params=protocol.get('request_parameters',request_parameters({}))
         if not isinstance(params,dict):return False
         if 'max_completion_tokens' in params:
-            if infer_profile(tasks)=='asset' or set(params)-{'max_completion_tokens','reasoning_effort','store'}:return False
+            if set(params)-{'max_completion_tokens','reasoning_effort','store'}:return False
             config={'request_profile':'reasoning_chat',**params}
             if request_parameters(config)!=params:return False
         elif (params.get('temperature')!=0 or params.get('max_tokens')!=500
@@ -393,25 +430,35 @@ def build_messages(dimension: str, system_prompt: str, task: dict,
 
 
 def parse_score(content, dimension: str, *, asset_response: bool = False) -> dict:
+    """Require an explicit numeric dimension; auxiliary omissions are diagnostic."""
     if isinstance(content,list):
-        content=''.join(p.get('text','') for p in content if isinstance(p,dict) and p.get('type')=='text')
-    if not isinstance(content,str):raise JudgeError('Judge response content is not text')
-    text=content.strip()
-    if text.startswith('```'):
-        text=re.sub(r'^```(?:json)?\s*','',text,flags=re.I)
-        text=re.sub(r'\s*```$','',text)
-    try:data=json.loads(text)
-    except (ValueError,TypeError) as exc:raise JudgeError('Judge returned invalid JSON') from exc
+        content=''.join(p['text'] for p in content if isinstance(p,dict)
+                       and p.get('type') in ('text','output_text') and isinstance(p.get('text'),str))
+    if isinstance(content,dict):data=content
+    else:
+        if not isinstance(content,str):raise JudgeError('Judge response content is not text or an object')
+        text=content.strip()
+        if text.startswith('```'):
+            text=re.sub(r'^```(?:json)?\s*','',text,flags=re.I)
+            text=re.sub(r'\s*```$','',text)
+        try:data=json.loads(text)
+        except (ValueError,TypeError) as exc:raise JudgeError('Judge returned invalid JSON') from exc
     if not isinstance(data,dict) or dimension not in data:raise JudgeError('Judge JSON is missing score')
     value=data[dimension]
-    if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or not 0<=value<=5:
+    if isinstance(value,bool) or not isinstance(value,(int,float)) or not 0<=value<=5 or not math.isfinite(value):
         raise JudgeError('Judge score must be numeric in [0,5]')
     rationale=data.get('rationale')
-    if not isinstance(rationale,str) or not rationale.strip():raise JudgeError('Judge JSON is missing rationale')
+    diagnostics=[]
+    if rationale is None:diagnostics.append('judge_rationale_missing')
+    elif not isinstance(rationale,str):
+        rationale=None;diagnostics.append('judge_rationale_invalid_type')
+    elif not rationale.strip():diagnostics.append('judge_rationale_empty')
     result={dimension:value,'rationale':rationale}
     if asset_response:
         try:result['evidence']=asset_validation.validate_evidence(data,dimension)
         except ValueError as exc:raise JudgeError(str(exc)) from exc
+        diagnostics.extend(asset_validation.inspect_evidence(data,dimension)[1])
+    if diagnostics:result['response_diagnostics']=diagnostics
     return result
 
 
@@ -438,10 +485,16 @@ def request_score(dimension: str, messages: list[dict], credentials: dict,
                 {'model':credentials['model'],'messages':messages,
                  **credentials.get('request_parameters',request_parameters({}))},credentials['timeout'])
             choice=data['choices'][0]
-            if choice.get('finish_reason')=='length':raise JudgeError('Judge response hit token limit')
-            result=parse_score(choice['message']['content'],dimension,asset_response=asset_response)
+            try:result=parse_score(choice['message']['content'],dimension,asset_response=asset_response)
+            except JudgeError as exc:
+                if choice.get('finish_reason')=='length':
+                    raise JudgeError('Judge response hit token limit: '+str(exc)) from exc
+                raise
             scored={'status':'scored','score':result[dimension],'rationale':result['rationale'],'attempts':attempt+1}
             if asset_response:scored['evidence']=result['evidence']
+            diagnostics=list(result.get('response_diagnostics',[]))
+            if choice.get('finish_reason')=='length':diagnostics.append('finish_reason_length_with_valid_score')
+            if diagnostics:scored['response_diagnostics']=diagnostics
             usage=data.get('usage')
             if isinstance(usage,dict):
                 scored['usage']={name:value for name in ('prompt_tokens','completion_tokens','total_tokens')
@@ -482,10 +535,11 @@ def prepare_case(task: dict, args, manifest, protocol: dict) -> tuple[dict, dict
             prediction,provenance=load_prediction(task,args.dataset,record=record,manifest_path=args.generation_manifest)
         else:
             if args.predictions is None:raise JudgeError('Specify --predictions or --generation-manifest')
-            pred_path=(args.predictions/task.get('output_filename',task['id']+'.png')).resolve()
-            prediction=read_rgb(pred_path)
-            provenance={'rgb_output':str(pred_path),'rgb_sha256':digest(pred_path.read_bytes()),
-                        'evaluation_roi':[0,0,source.shape[1],source.shape[0]]}
+            from output_adapter import load_prediction
+            prediction,validated=load_prediction(task,args.dataset,predictions_dir=args.predictions)
+            # Keep the existing external-score identity while sharing the pixel
+            # evaluator's RGB/RGBA channel and geometry policy.
+            provenance={key:validated[key] for key in ('rgb_output','rgb_sha256','evaluation_roi')}
         if source.shape!=prediction.shape:raise JudgeError('Source and prediction evaluation ROI dimensions differ')
     except ModelOutputError:
         raise
@@ -629,18 +683,17 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
     credentials=load_credentials(args)
     protocol={**metadata,'judge_model':credentials['model'],'endpoint':credentials['endpoint']}
     parameters=credentials['request_parameters']
-    if profile=='asset' and (parameters.get('temperature')!=0 or parameters.get('max_tokens')!=500
-                            or set(parameters)-{'temperature','max_tokens','store'}):
-        raise JudgeError('Asset judging requires temperature=0 and max_tokens=500')
     if parameters!=request_parameters({}):
         # Leave old official fingerprints identical. Explicit alternate API
         # parameters participate in input/cache and cross-model comparison IDs.
         protocol.update(request_parameters=parameters,temperature=parameters.get('temperature'),
                         max_tokens_per_criterion=parameters.get('max_tokens',parameters.get('max_completion_tokens')))
-    old=load_score_cache(args.output)
+    cache_diagnostics=[]
+    old=load_score_cache(args.output,diagnostics=cache_diagnostics)
     manifest=load_manifest(args.generation_manifest)
     # Validate everything that can fail before replacing the current report.
     # One recoverable snapshot per run avoids a backup per dimension/request.
+    preserve_cache_recovery_sources(cache_diagnostics)
     backup_existing(args.output)
     backup_existing(cache_path(args.output))
     pending_reason='dry_run' if args.dry_run else ('needs_api' if not credentials['api_key'] or not credentials['model'] else None)
@@ -651,6 +704,9 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
             'storage':{'cache_schema_version':CACHE_SCHEMA_VERSION,
                        'cache_file':str(cache_path(args.output)),
                        'cache_scope':'Validated paid scores for all historical IDs and input/judge fingerprints; excluded from this report denominator'}}
+    if cache_diagnostics:
+        report['storage']['cache_recovery']=cache_diagnostics
+        print(f'MLLM cache recovery: ignored {len(cache_diagnostics)} invalid cache entries; damaged sources preserved in .rejected-*.bak files.',file=sys.stderr,flush=True)
     positions={r['id']:i for i,r in enumerate(report['results'])}
     state_lock=Lock();stop=Event()
     counts={'done':0,'failed':0,'cached':0,'cases':0,'model_failures':0}
@@ -667,7 +723,8 @@ def _evaluate_locked(args, transport: Callable, sleeper: Callable) -> tuple[dict
         report['response_validation']={'version':asset_validation.VERSION,
             'source':str(validation_source),'source_sha256':digest(validation_source.read_bytes()),
             'semantic_disagreements':'review_only','scores_modified':False,
-            'retry_on_semantic_disagreement':False}
+            'retry_on_semantic_disagreement':False,'auxiliary_evidence':'optional; usable supplied fields normalized with diagnostics',
+            'retry_on_auxiliary_evidence_omission':False}
     def counted_transport(*values):
         with state_lock:
             if stop.is_set():raise JudgeError('Evaluation interrupted')

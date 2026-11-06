@@ -254,6 +254,17 @@ def expected_case_ids(protocol,tasks,requested=None):
     return expected
 
 
+def _text_joint_qualification(rows,expected,*,validated):
+    """Use the four standard axes after input/score validation; SE is separate."""
+    scored=[row for row in rows if all(row['dimensions'][name]['status']=='scored'
+                                       for name in STANDARD_DIMENSIONS)] if validated else []
+    qualified=sum(all(row['dimensions'][name]['score']>=4 for name in STANDARD_DIMENSIONS) for row in scored)
+    complete=bool(validated and expected and len(scored)==expected)
+    return {'dimensions':list(STANDARD_DIMENSIONS),'threshold_each':4,
+        'qualified':qualified if validated else None,'expected':expected,'scored':len(scored),
+        'complete':complete,'rate':qualified/expected if complete else None}
+
+
 def evaluate_run(run_dir,dataset_root=ROOT,*,mode='formal',expected_ids=None):
     """Return (report, exit code); no mutable dataset or run file is touched."""
     if mode not in ('formal','pixel-only','dry-run'):raise ValueError('Unknown report mode')
@@ -308,6 +319,10 @@ def evaluate_run(run_dir,dataset_root=ROOT,*,mode='formal',expected_ids=None):
     if profile=='asset':
         semantic_values['joint_qualification_rate']=(semantic_summary['joint_qualification']['rate']
             if judge_inputs_ok and mode!='dry-run' else None)
+    else:
+        joint=_text_joint_qualification((judge or {}).get('results',[]),len(expected),
+                                       validated=judge_inputs_ok and mode!='dry-run')
+        semantic_values['joint_qualification_rate']=joint['rate']
     binding_rows=[]
     if pixel:
         for row in pixel.get('results',[]):
@@ -331,6 +346,7 @@ def evaluate_run(run_dir,dataset_root=ROOT,*,mode='formal',expected_ids=None):
         'metrics':{**pixel_values,**semantic_values},
         'pixel_coverage':pixel_coverage,
         'semantic_coverage':{key:{k:v for k,v in value.items() if k!='mean'} for key,value in criteria.items()},
+        **({'joint_qualification':joint} if profile=='text' else {}),
         'mllm_api_calls_in_last_stage':(judge or {}).get('api_calls_made',0),
         'comparison_protocol':{'track':profile,'dataset':{k:v for k,v in identity.items() if k!='dataset_root'},
             'case_ids':sorted(expected),'resolution_protocol':protocol.get('resolution_protocol','legacy-unspecified'),

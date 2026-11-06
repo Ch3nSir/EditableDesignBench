@@ -101,6 +101,14 @@ class PixelResumeTests(unittest.TestCase):
         self.output.write_text(json.dumps(document));evaluate.cache_path(self.output).unlink();self.calls=[]
         self.assertEqual(self.invoke(),0);self.assertEqual(self.calls,[])
 
+    def test_pre_recovery_wrapper_report_migrates_without_recomputing(self):
+        self.assertEqual(self.invoke(),0)
+        document=self.report()
+        document['protocol']['evaluator_sources']['evaluate.py']['sha256']='38aaf28fbafa36085a58e54710f9b4d838b2f72e8e15b12c5c0f2eaaff726817'
+        document['protocol']['evaluator_sources']['output_adapter.py']['sha256']='85d656ea28734923af930de286a768784ac925a01fa1ad0c9615bb06d7683049'
+        self.output.write_text(json.dumps(document));evaluate.cache_path(self.output).unlink();self.calls=[]
+        self.assertEqual(self.invoke(),0);self.assertEqual(self.calls,[])
+
     def test_alpha_policy_diagnostics_change_keeps_validated_rgb_scores(self):
         self.assertEqual(self.invoke(),0)
         document=self.report()
@@ -131,11 +139,65 @@ class PixelResumeTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):self.invoke()
         self.calls=[];self.assertEqual(self.invoke(),0);self.assertEqual(len(self.calls),1)
 
-    def test_force_recompute_and_corrupt_report_preservation(self):
+    def test_force_recompute_and_corrupt_report_recovers_verified_sidecar(self):
         self.assertEqual(self.invoke(),0);self.calls=[]
         self.assertEqual(self.invoke('--no-resume'),0);self.assertEqual(len(self.calls),2)
         self.output.write_text('{broken');self.calls=[]
-        self.assertEqual(self.invoke(),2);self.assertEqual(self.output.read_text(),'{broken');self.assertEqual(self.calls,[])
+        self.assertEqual(self.invoke(),0);self.assertEqual(self.calls,[])
+        self.assertEqual(self.output.with_name(self.output.name+'.bak').read_text(),'{broken')
+        self.assertTrue(self.report()['resume_diagnostics'])
+        self.assertEqual(self.report()['resume']['reused_metrics'],8)
+
+    def test_corrupt_report_without_sidecar_recomputes_and_preserves_diagnostic(self):
+        self.assertEqual(self.invoke(),0)
+        evaluate.cache_path(self.output).unlink();self.output.write_text('{broken');self.calls=[]
+        self.assertEqual(self.invoke(),0);self.assertEqual(len(self.calls),2)
+        self.assertEqual(self.output.with_name(self.output.name+'.bak').read_text(),'{broken')
+        self.assertIn('report cache ignored',self.report()['resume_diagnostics'][0])
+
+    def test_corrupt_sidecar_does_not_block_valid_primary_report(self):
+        self.assertEqual(self.invoke(),0)
+        sidecar=evaluate.cache_path(self.output);sidecar.write_text('{broken');self.calls=[]
+        self.assertEqual(self.invoke(),0);self.assertEqual(self.calls,[])
+        self.assertEqual(sidecar.with_name(sidecar.name+'.bak').read_text(),'{broken')
+        self.assertTrue(any('sidecar cache ignored' in error for error in self.report()['resume_diagnostics']))
+
+    def test_one_bad_primary_record_does_not_block_other_verified_cases(self):
+        self.assertEqual(self.invoke(),0)
+        document=self.report();document['results'][0]=None
+        self.output.write_text(json.dumps(document));evaluate.cache_path(self.output).unlink();self.calls=[]
+        self.assertEqual(self.invoke(),0);self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.report()['resume']['reused_metrics'],4)
+        self.assertTrue(any('record must be an object' in error for error in self.report()['resume_diagnostics']))
+
+    def test_bad_sidecar_records_are_isolated_and_bindings_stay_mandatory(self):
+        self.assertEqual(self.invoke(),0)
+        sidecar=evaluate.cache_path(self.output);saved=json.loads(sidecar.read_text())
+        saved['records'][0]['input_binding']['sha256']='0'*64
+        saved['records'].insert(0,None)
+        corrupt=json.dumps(saved);sidecar.write_text(corrupt);self.output.unlink();self.calls=[]
+        self.assertEqual(self.invoke(),0);self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.report()['resume']['reused_metrics'],4)
+        self.assertEqual(sidecar.with_name(sidecar.name+'.bak').read_text(),corrupt)
+        errors=self.report()['resume_diagnostics']
+        self.assertTrue(any('record must be an object' in error for error in errors))
+        self.assertTrue(any('input binding fingerprint mismatch' in error for error in errors))
+
+    def test_bad_sidecar_protocol_fingerprint_does_not_block_valid_protocol(self):
+        self.assertEqual(self.invoke(),0)
+        sidecar=evaluate.cache_path(self.output);saved=json.loads(sidecar.read_text())
+        saved['protocols']['0'*64]=next(iter(saved['protocols'].values()))
+        saved['records'][0]['protocol_key']='0'*64
+        sidecar.write_text(json.dumps(saved));self.output.unlink();self.calls=[]
+        self.assertEqual(self.invoke(),0);self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.report()['resume']['reused_metrics'],4)
+        self.assertTrue(any('protocol fingerprint mismatch' in error for error in self.report()['resume_diagnostics']))
+
+    def test_report_recovery_still_validates_current_prediction(self):
+        self.assertEqual(self.invoke(),0);self.output.write_text('{broken');self.calls=[]
+        Image.new('RGB',(64,64),'red').save(self.predictions/'a.png')
+        self.assertEqual(self.invoke(),0);self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.report()['resume']['reused_metrics'],4)
 
 
 if __name__=='__main__':unittest.main()

@@ -65,15 +65,65 @@ class AssetJudgeTests(unittest.TestCase):
         urls=[x['image_url']['url'] for x in payload['messages'][1]['content'] if x['type']=='image_url']
         return [Image.open(io.BytesIO(base64.b64decode(url.split(',',1)[1]))) for url in urls]
 
-    def test_evidence_is_required_and_scores_are_not_silently_clamped(self):
+    def test_missing_auxiliary_evidence_keeps_scores_and_resumes_without_more_calls(self):
         args=self.args('--ids',self.tasks[0]['id'])
         def unsupported(e,k,p,t):
             return {'choices':[{'message':{'content':json.dumps({self.dimension(p):5,'rationale':'Looks good.'})}}]}
         report,code=judge.evaluate(args,transport=unsupported)
-        self.assertEqual(code,1)
-        self.assertEqual(report['summary']['errors'],1)
-        self.assertTrue(all(v['score'] is None for v in report['results'][0]['dimensions'].values()))
-        self.assertEqual(report['results'][0]['dimensions']['IF']['error'],'Asset judge response requires evidence')
+        self.assertEqual(code,0);self.assertEqual(report['api_calls_made'],4)
+        self.assertEqual(report['summary']['errors'],0)
+        for value in report['results'][0]['dimensions'].values():
+            self.assertEqual(value['score'],5)
+            self.assertEqual(value['evidence'],{})
+            self.assertEqual(value['response_diagnostics'],['asset_evidence_missing'])
+        self.assertEqual(report['results'][0]['consistency_flags'],[])
+        resumed,code=judge.evaluate(args,transport=lambda *a:self.fail('Missing auxiliary evidence repeated paid scores'))
+        self.assertEqual(code,0);self.assertEqual(resumed['api_calls_made'],0)
+        self.assertEqual(resumed['resume']['cached_dimensions'],4)
+
+    def test_auxiliary_evidence_is_normalized_without_inventing_observations(self):
+        payload={'IF':4,'rationale':'The visible change was checked.',
+                 'evidence':{'source':' Original vase. ','target_match':' YES ',
+                             'operation':'Not Done','defects':[' Visible edge. ',None,'']}}
+        parsed=judge.parse_score(json.dumps(payload),'IF',asset_response=True)
+        self.assertEqual(parsed['IF'],4)
+        self.assertEqual(parsed['evidence'],{'source':'Original vase.','target_match':'yes',
+                         'operation':'not_done','defects':['Visible edge.']})
+        self.assertIn('asset_evidence_missing_or_invalid_candidate',parsed['response_diagnostics'])
+        self.assertIn('asset_evidence_normalized_target_match',parsed['response_diagnostics'])
+        self.assertIn('asset_evidence_normalized_operation',parsed['response_diagnostics'])
+        self.assertIn('asset_evidence_invalid_defect_entries',parsed['response_diagnostics'])
+        flags=asset.consistency_flags({'IF':{'status':'scored','score':4,'evidence':parsed['evidence']}})
+        self.assertEqual(flags,['IF_score_operation_disagreement'])
+        for evidence in ({'target_match':'unknown','operation':42},{'defects':[None,'']},[],None):
+            with self.subTest(evidence=evidence):
+                payload['evidence']=evidence
+                parsed=judge.parse_score(json.dumps(payload),'IF',asset_response=True)
+                self.assertEqual(parsed['evidence'],{})
+                self.assertTrue(parsed['response_diagnostics'])
+                self.assertEqual(asset.consistency_flags({'IF':{'status':'scored','score':4,'evidence':{}}}),[])
+
+    def test_auxiliary_evidence_does_not_relax_required_numeric_score(self):
+        for payload in ({'rationale':'Checked.'},{'IF':True,'rationale':'Checked.'},
+                        {'IF':'4','rationale':'Checked.'},{'IF':6,'rationale':'Checked.'}):
+            with self.subTest(payload=payload),self.assertRaises(judge.JudgeError):
+                judge.parse_score(json.dumps(payload),'IF',asset_response=True)
+
+    def test_score_only_asset_response_is_reusable_and_accepted_by_formal_validation(self):
+        from formal_report import _judge_values
+        args=self.args('--ids',self.tasks[0]['id'])
+        def transport(e,k,p,t):
+            return {'choices':[{'message':{'content':{self.dimension(p):4}}}]}
+        report,code=judge.evaluate(args,transport=transport)
+        self.assertEqual(code,0);self.assertEqual(report['api_calls_made'],4)
+        for value in report['results'][0]['dimensions'].values():
+            self.assertEqual(value['score'],4);self.assertIsNone(value['rationale'])
+            self.assertEqual(value['evidence'],{})
+            self.assertIn('judge_rationale_missing',value['response_diagnostics'])
+        _,complete=_judge_values(report,[self.tasks[0]['id']],{task['id']:task for task in self.tasks})
+        self.assertTrue(complete)
+        resumed,code=judge.evaluate(args,transport=lambda *a:self.fail('Score-only response repeated paid calls'))
+        self.assertEqual(code,0);self.assertEqual(resumed['api_calls_made'],0)
 
     def test_self_contradictory_response_is_accepted_once_with_original_score(self):
         args=self.args('--ids',self.tasks[0]['id'],'--max-retries','1')
@@ -301,7 +351,7 @@ class AssetJudgeTests(unittest.TestCase):
         self.assertEqual(report['summary']['joint_qualification']['rate'],0)
         self.assertNotIn('unsafe provider body',json.dumps(report))
 
-    def test_wrong_profile_unknown_protocol_mixed_tracks_reference_and_reasoning_config_rejected(self):
+    def test_wrong_profile_unknown_protocol_mixed_tracks_and_reference_rejected(self):
         output=self.root/'scores.json';output.write_text('keep')
         original=deepcopy(self.tasks)
         for mutation in ('missing_protocol','unknown_protocol','bad_operation','mixed'):
@@ -316,9 +366,65 @@ class AssetJudgeTests(unittest.TestCase):
             self.assertEqual(output.read_text(),'keep')
         self.tasks=original;self.write_tasks()
         with self.assertRaises(judge.JudgeError):judge.evaluate(self.args('--mode','reference'))
-        config=self.root/'judge.json';config.write_text(json.dumps({'request_profile':'reasoning_chat'}))
-        with self.assertRaises(judge.JudgeError):judge.evaluate(self.args('--config',str(config)))
         self.assertEqual(output.read_text(),'keep')
+
+    def test_explicit_reasoning_chat_is_supported_and_recorded_for_asset_judging(self):
+        from formal_report import _judge_values
+        config=self.root/'judge.json'
+        settings={'request_profile':'reasoning_chat','max_completion_tokens':4096,
+                  'reasoning_effort':'low','store':False}
+        config.write_text(json.dumps(settings));payloads=[]
+        def transport(e,k,p,t):payloads.append(p);return self.success(e,k,p,t)
+        report,code=judge.evaluate(self.args('--ids',self.tasks[0]['id'],'--config',str(config)),transport=transport)
+        self.assertEqual(code,0);self.assertEqual(report['api_calls_made'],4)
+        for payload in payloads:
+            self.assertNotIn('temperature',payload);self.assertNotIn('max_tokens',payload)
+            self.assertEqual(payload['max_completion_tokens'],4096)
+            self.assertEqual(payload['reasoning_effort'],'low');self.assertIs(payload['store'],False)
+        self.assertIsNone(report['protocol']['temperature'])
+        self.assertEqual(report['protocol']['max_tokens_per_criterion'],4096)
+        self.assertEqual(report['protocol']['request_parameters'],judge.request_parameters(settings))
+        self.assertTrue(judge.validate_report_protocol(report['protocol'],self.tasks))
+        _,complete=_judge_values(report,[self.tasks[0]['id']],{task['id']:task for task in self.tasks})
+        self.assertTrue(complete)
+        for update in ({'temperature':0},{'max_tokens_per_criterion':500},
+                       {'request_parameters':{'max_completion_tokens':4096,'reasoning_effort':'invalid'}},
+                       {'request_parameters':{'max_completion_tokens':4096,'reasoning_effort':'low','temperature':0}}):
+            with self.subTest(update=update):
+                self.assertFalse(judge.validate_report_protocol({**report['protocol'],**update},self.tasks))
+
+    def test_asset_reasoning_parameters_and_judge_isolate_cache_and_comparison(self):
+        from formal_report import _judge_comparison_protocol
+        args=self.args('--ids',self.tasks[0]['id'])
+        default,code=judge.evaluate(args,transport=self.success)
+        self.assertEqual(code,0);self.assertEqual(default['api_calls_made'],4)
+        self.assertEqual(default['protocol']['temperature'],0)
+        self.assertEqual(default['protocol']['max_tokens_per_criterion'],500)
+        self.assertNotIn('request_parameters',default['protocol'])
+        config=self.root/'judge.json';args.config=config
+        settings={'request_profile':'reasoning_chat','max_completion_tokens':4096,'reasoning_effort':'low'}
+        config.write_text(json.dumps(settings))
+        low,code=judge.evaluate(args,transport=self.success)
+        self.assertEqual(code,0);self.assertEqual(low['api_calls_made'],4)
+        cached,code=judge.evaluate(args,transport=lambda *a:self.fail('Matching reasoning parameters repeated API calls'))
+        self.assertEqual(code,0);self.assertEqual(cached['api_calls_made'],0)
+        changed=[]
+        for updates in ({'reasoning_effort':'medium'}, {'max_completion_tokens':2048}, {'model':'another-judge'}):
+            with self.subTest(updates=updates):
+                config.write_text(json.dumps({**settings,**updates}))
+                report,code=judge.evaluate(args,transport=self.success)
+                self.assertEqual(code,0);self.assertEqual(report['api_calls_made'],4)
+                self.assertTrue(judge.validate_report_protocol(report['protocol'],self.tasks))
+                changed.append(report)
+        for report in (default,*changed):
+            self.assertNotEqual(low['results'][0]['fingerprint'],report['results'][0]['fingerprint'])
+            self.assertNotEqual(_judge_comparison_protocol(low),_judge_comparison_protocol(report))
+        config.write_text(json.dumps(settings))
+        restored,code=judge.evaluate(args,transport=lambda *a:self.fail('Reasoning cache history was erased'))
+        self.assertEqual(code,0);self.assertEqual(restored['api_calls_made'],0)
+        args.config=None
+        restored,code=judge.evaluate(args,transport=lambda *a:self.fail('Default parameter cache history was erased'))
+        self.assertEqual(code,0);self.assertEqual(restored['api_calls_made'],0)
 
     def test_summary_joint_threshold_is_per_dimension_and_operation_denominators_are_fixed(self):
         records=[]

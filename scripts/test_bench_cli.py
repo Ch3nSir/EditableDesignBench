@@ -1,5 +1,6 @@
 """CLI planning tests; every model/API/Slurm subprocess is simulated."""
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -217,6 +218,20 @@ class BenchCLITests(unittest.TestCase):
         self.assertTrue(all('--pixel-only' in c for c in self.calls if Path(c[1]).name in ('formal_report.py','compare_models.py')))
         for model in self.models:self.assertTrue((self.experiment/model/'stages_all.json').exists())
 
+    def test_busy_model_keeps_active_files_and_does_not_block_other_models(self):
+        self.make_protocols()
+        first=self.experiment/self.models[0]
+        with (first/'.evaluation.lock').open('a+b') as active:
+            fcntl.flock(active,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with patch.object(bench,'run_command',side_effect=self.local):
+                code=self.invoke('evaluate','--runs-root',str(self.experiment),'--pixel-only')
+        self.assertEqual(code,1)
+        self.assertFalse((first/'stages_all.json').exists())
+        self.assertTrue((self.experiment/self.models[1]/'stages_all.json').exists())
+        pixels=[c for c in self.calls if Path(c[1]).name=='evaluate.py']
+        self.assertEqual(len(pixels),1)
+        self.assertIn(self.models[1],pixels[0][pixels[0].index('--generation-manifest')+1])
+
     def test_dry_run_has_no_real_scoring_flag_and_compares_pixel_track(self):
         self.make_protocols()
         with patch.object(bench,'run_command',side_effect=self.local):
@@ -298,7 +313,8 @@ class BenchCLITests(unittest.TestCase):
     def test_submit_chains_generation_gpu_pixels_cpu_judge_and_comparison(self):
         with patch.object(bench.subprocess,'run',side_effect=self.scheduler):
             self.assertEqual(self.invoke(*self.generate_args('--submit')),0)
-            self.assertEqual(self.invoke('evaluate','--runs-root',str(self.experiment),'--dry-run','--submit'),0)
+            self.assertEqual(self.invoke('evaluate','--runs-root',str(self.experiment),'--dry-run','--submit',
+                                         '--device','cuda','--gpu-constraint','h200'),0)
         jobs=json.loads((self.experiment/'jobs.json').read_text());entries=jobs['entries']
         self.assertEqual(len(entries),7)
         for model in self.models:
@@ -307,11 +323,33 @@ class BenchCLITests(unittest.TestCase):
             self.assertEqual(judge['dependencies'],[pixel['job_id']])
             gpu_text=Path(pixel['script']).read_text();cpu_text=Path(judge['script']).read_text()
             self.assertIn('#SBATCH --gres=gpu:1',gpu_text);self.assertIn('--stage pixel',gpu_text)
-            self.assertNotIn('#SBATCH --gres',cpu_text);self.assertIn('--stage judge',cpu_text)
+            self.assertIn('#SBATCH --gres=gpu:0',cpu_text);self.assertIn('--stage judge',cpu_text)
+            self.assertIn('#SBATCH --constraint=h200',gpu_text)
+            self.assertIn('#SBATCH --constraint=h200',cpu_text)
             self.assertIn('CUDA_VISIBLE_DEVICES=""',cpu_text);self.assertIn('--dry-run',cpu_text)
         self.assertEqual(set(entries['comparison']['dependencies']),{entries['judge:'+m]['job_id'] for m in self.models})
         submits=[c for c in self.calls if c[0]=='sbatch']
         self.assertTrue(all(any(v.startswith('--dependency=afterany:') for v in c) for c in submits[2:]))
+
+    def test_submitted_cpu_evaluation_never_requests_gpu_and_preserves_judge_profile(self):
+        self.make_protocols()
+        with patch.object(bench.subprocess,'run',side_effect=self.scheduler):
+            self.assertEqual(self.invoke('evaluate','--runs-root',str(self.experiment),'--dry-run','--submit',
+                '--device','cpu','--gpu-constraint','blackwell','--text-profile','texteditbench'),0)
+        entries=json.loads((self.experiment/'jobs.json').read_text())['entries']
+        self.assertEqual(len(entries),5)
+        for entry in entries.values():
+            self.assertFalse(entry['gpu'])
+            self.assertEqual(entry['gpu_constraint'],'blackwell')
+            script=Path(entry['script']).read_text()
+            self.assertIn('#SBATCH --gres=gpu:0',script)
+            self.assertIn('#SBATCH --constraint=blackwell',script)
+            self.assertIn('CUDA_VISIBLE_DEVICES=""',script)
+            self.assertNotIn('--device cuda',script)
+            if '--stage' in entry['command']:
+                command=entry['command']
+                self.assertEqual(command[command.index('--device')+1],'cpu')
+                self.assertEqual(command[command.index('--text-profile')+1],'texteditbench')
 
     def test_submit_config_path_is_quoted_and_key_never_enters_script(self):
         self.plan_local();config=self.root/'judge $(literal) config.json';config.write_text('{}')

@@ -170,5 +170,24 @@ class NativeAlphaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Model input hash mismatch'):
             self.load(record)
 
+    def test_external_rgba_uses_exact_rgb_channels_without_rewriting_or_alpha_gate(self):
+        prediction=self.root/'a.png'
+        for alpha in (0,127,255):
+            with self.subTest(alpha=alpha):
+                pixels=np.dstack([self.rgb,np.full((32,32),alpha,np.uint8)])
+                Image.fromarray(pixels).save(prediction);before=prediction.read_bytes()
+                result,provenance=load_prediction(self.task,self.root,predictions_dir=self.root)
+                self.assertTrue(np.array_equal(result,self.rgb))
+                self.assertEqual(prediction.read_bytes(),before)
+                self.assertEqual(provenance['mode'],'native_rgba_rgb_channels')
+                self.assertEqual(provenance['alpha_evaluation_roi']['minimum'],alpha)
+                self.assertEqual(provenance['raw_sha256'],sha256_file(prediction))
+                self.assertEqual(provenance['rgb_output'],str(prediction.resolve()))
+
+    def test_external_rgba_still_rejects_unrecorded_resizing(self):
+        Image.new('RGBA',(64,32),(20,40,60,0)).save(self.root/'a.png')
+        with self.assertRaisesRegex(ValueError,'Dimension mismatch'):
+            load_prediction(self.task,self.root,predictions_dir=self.root)
+
 
 if __name__=='__main__':unittest.main()

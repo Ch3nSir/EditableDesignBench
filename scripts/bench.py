@@ -184,9 +184,8 @@ def _job_script(root,label,command,*,gpu,cpus,memory,time_limit,partition='gpu',
            '#SBATCH --cpus-per-task='+str(cpus),'#SBATCH --mem='+memory,'#SBATCH --time='+time_limit,
            '#SBATCH --output='+shlex.quote(str(log/(label+'-%j.out'))),
            '#SBATCH --error='+shlex.quote(str(log/(label+'-%j.err')))]
-    if gpu:
-        lines.append('#SBATCH --gres=gpu:1')
-        if gpu_constraint:lines.append('#SBATCH --constraint='+gpu_constraint)
+    lines.append('#SBATCH --gres=gpu:'+('1' if gpu else '0'))
+    if gpu_constraint:lines.append('#SBATCH --constraint='+gpu_constraint)
     lines.extend(['set -euo pipefail','cd '+shlex.quote(str(ROOT)),
         'export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS='+str(cpus)+' MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1',
         'export TOKENIZERS_PARALLELISM=false HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1'])
@@ -197,7 +196,7 @@ def _job_script(root,label,command,*,gpu,cpus,memory,time_limit,partition='gpu',
 
 def submit_job(root,jobs,key,label,command,*,gpu,cpus,memory,time_limit,dependencies=None,partition='gpu',gpu_constraint=None):
     request={'command':[str(v) for v in command],'gpu':gpu,'cpus':cpus,'memory':memory,'time':time_limit}
-    request.update(partition=partition,gpu_constraint=gpu_constraint if gpu else None)
+    request.update(partition=partition,gpu_constraint=gpu_constraint)
     fingerprint=canonical_hash(request);previous=jobs['entries'].get(key)
     if previous and active_job(previous['job_id']):
         if previous.get('request_sha256')!=fingerprint:raise ValueError('An active Slurm job already has another configuration: '+key)
@@ -304,7 +303,12 @@ def _local_evaluate(args,dataset,selected,runs,expected):
         commands=evaluation_commands(args,run,dataset,expected);stages={}
         with (run/'.evaluation.lock').open('a+b') as lock:
             try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            except BlockingIOError:raise ValueError('Another evaluation is writing this model run: '+model) from None
+            except BlockingIOError:
+                # Protect the active writer and let other independent models run.
+                results[model]={'busy':1}
+                print(json.dumps({'model':model,'status':'busy',
+                    'error':'Another evaluation is writing this model run; its files are unchanged'}),flush=True)
+                continue
             try:
                 if args.stage in ('all','pixel'):
                     for name in ('pixel','preview'):stages[name]=run_command(commands[name])
@@ -327,10 +331,11 @@ def compare_command(args,root,dataset,selected,expected=None):
 
 def _stage_command(args,root,dataset,model,stage):
     command=[args.python,str(SCRIPTS/'bench.py'),'evaluate','--runs-root',str(root),'--dataset-root',str(dataset),
-             '--models',model,'--stage',stage,'--no-compare','--device','cuda' if stage=='pixel' else 'cpu']
+             '--models',model,'--stage',stage,'--no-compare','--device',args.device if stage=='pixel' else 'cpu']
     if args.config is not None:command.extend(['--config',str(args.config)])
     if not getattr(args,'resume',True):command.append('--no-resume')
-    command.extend(['--workers',str(getattr(args,'workers',5))])
+    command.extend(['--workers',str(getattr(args,'workers',5)),
+                    '--text-profile',getattr(args,'text_profile','strict')])
     if not getattr(args,'progress',True):command.append('--no-progress')
     if args.pixel_only:command.append('--pixel-only')
     elif args.dry_run:command.append('--dry-run')
@@ -384,14 +389,16 @@ def evaluate(args):
                 prior=jobs['entries'].get('generate:'+model)
                 dependency=[prior['job_id']] if prior and active_job(prior['job_id']) else []
                 pixel=submit_job(root,jobs,'pixel:'+model,'pixels-'+model,_stage_command(args,root,dataset,model,'pixel'),
-                    gpu=True,cpus=args.cpus_per_task,memory=args.memory,time_limit='02:00:00',dependencies=dependency,
+                    gpu=args.device=='cuda',cpus=args.cpus_per_task,memory=args.memory,time_limit='02:00:00',dependencies=dependency,
                     partition=args.partition,gpu_constraint=args.gpu_constraint)
                 judge=submit_job(root,jobs,'judge:'+model,'judge-'+model,_stage_command(args,root,dataset,model,'judge'),
-                    gpu=False,cpus=2,memory='16G',time_limit=args.time,dependencies=[pixel],partition=args.partition)
+                    gpu=False,cpus=2,memory='16G',time_limit=args.time,dependencies=[pixel],partition=args.partition,
+                    gpu_constraint=args.gpu_constraint)
                 completed.append(judge)
             command=compare_command(args,root,dataset,selected,expected)
             submit_job(root,jobs,'comparison','compare-edit-models',command,gpu=False,cpus=2,memory='16G',
-                       time_limit='02:00:00',dependencies=completed,partition=args.partition)
+                       time_limit='02:00:00',dependencies=completed,partition=args.partition,
+                       gpu_constraint=args.gpu_constraint)
         return 0
     results=_local_evaluate(args,dataset,selected,runs,expected)
     failed=any(code for stages in results.values() for code in stages.values())

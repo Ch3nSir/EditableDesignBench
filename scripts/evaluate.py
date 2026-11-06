@@ -32,9 +32,11 @@ ROOT=Path(__file__).resolve().parents[1]
 # of previously accepted inputs. Unknown implementation changes invalidate reuse.
 COMPATIBLE_WRAPPERS={
     'evaluate.py':{'05e968d463b0583e3a1d251007190677c2b8ead709088ee4cde5af91d33dac13',
-                   '3ec5a54f267b25c4363ab375790446356108805e8f52b61febfe5069d1fbc0f1'},
+                   '3ec5a54f267b25c4363ab375790446356108805e8f52b61febfe5069d1fbc0f1',
+                   '38aaf28fbafa36085a58e54710f9b4d838b2f72e8e15b12c5c0f2eaaff726817'},
     'official_pixel_metrics.py':{'074806c9dd10dbbd26c8375cb632b9230aecdd10fe1af8e21d537fd6f8fa6055'},
-    'output_adapter.py':{'0d22becf61d07def54a37a4f5615b86cbc91de757ee571c359360021a3fe0169'},
+    'output_adapter.py':{'0d22becf61d07def54a37a4f5615b86cbc91de757ee571c359360021a3fe0169',
+                         '85d656ea28734923af930de286a768784ac925a01fa1ad0c9615bb06d7683049'},
 }
 
 
@@ -59,10 +61,13 @@ def _compatible_protocol(previous,current):
     ignored={'runtime_warnings','evaluator_sources'}
     if {k:v for k,v in previous.items() if k not in ignored}!={k:v for k,v in current.items() if k not in ignored}:return False
     old_sources=previous.get('evaluator_sources',{});new_sources=current['evaluator_sources']
+    if not isinstance(old_sources,dict):return False
     if set(old_sources)!=set(new_sources):return False
     for name,source in new_sources.items():
         old=old_sources[name]
+        if not isinstance(old,dict):return False
         if old.get('path')!=source['path']:return False
+        if not isinstance(old.get('sha256'),str):return False
         if old.get('sha256') not in {source['sha256'],*COMPATIBLE_WRAPPERS.get(name,set())}:return False
     return True
 
@@ -70,7 +75,8 @@ def _compatible_protocol(previous,current):
 def _cached_number(name,value):
     if name=='psnr' and value=='inf':return math.inf
     if isinstance(value,bool) or not isinstance(value,(int,float)):return None
-    value=float(value)
+    try:value=float(value)
+    except OverflowError:return None
     if not math.isfinite(value) and not (name=='psnr' and value==math.inf):return None
     if name in ('mse','psnr','lpips') and value<0:return None
     if name=='mse' and value>65025:return None
@@ -78,45 +84,79 @@ def _cached_number(name,value):
     return value
 
 
-def merge_pixel_cache(cache,protocol,rows):
+def merge_pixel_cache(cache,protocol,rows,*,source=None):
     key=_protocol_key(protocol)
-    for row in rows:
-        binding=row.get('input_binding') or {};provenance=row.get('provenance')
-        if not isinstance(binding.get('sha256'),str) or not isinstance(provenance,dict):continue
-        if canonical_hash({k:v for k,v in binding.items() if k!='sha256'})!=binding['sha256']:continue
-        good={}
-        for name in METRICS:
-            if row.get('metric_status',{}).get(name)!='ok':continue
-            value=_cached_number(name,row.get(name))
-            if value is not None:good[name]=value
-        if not good:continue
-        cache['protocols'][key]=deepcopy(protocol)
-        slot=(key,row['id'],binding['sha256'])
-        if slot not in cache['records']:
-            cache['records'][slot]={'protocol_key':key,'id':row['id'],'input_binding':deepcopy(binding),
-                                    'provenance':deepcopy(provenance),'scores':{}}
-        cache['records'][slot]['scores'].update(good)
+    for index,row in enumerate(rows):
+        try:
+            if not isinstance(row,dict):raise ValueError('record must be an object')
+            states=row.get('metric_status',{})
+            if not isinstance(states,dict):raise ValueError('metric_status must be an object')
+            good={}
+            for name in METRICS:
+                if states.get(name)!='ok':continue
+                value=_cached_number(name,row.get(name))
+                if value is not None:good[name]=value
+                elif source:cache['diagnostics'].append(f'{source} record {index}: invalid successful {name}; ignored')
+            if not good:continue
+            binding=row.get('input_binding');provenance=row.get('provenance')
+            if not isinstance(row.get('id'),str) or not row['id']:raise ValueError('invalid record ID')
+            if not isinstance(binding,dict) or not isinstance(binding.get('sha256'),str):raise ValueError('missing input binding')
+            if not isinstance(provenance,dict):raise ValueError('missing provenance')
+            if canonical_hash({k:v for k,v in binding.items() if k!='sha256'})!=binding['sha256']:
+                raise ValueError('input binding fingerprint mismatch')
+            if binding.get('id')!=row['id']:raise ValueError('input binding ID mismatch')
+            cache['protocols'][key]=deepcopy(protocol)
+            slot=(key,row['id'],binding['sha256'])
+            if slot not in cache['records']:
+                cache['records'][slot]={'protocol_key':key,'id':row['id'],'input_binding':deepcopy(binding),
+                                        'provenance':deepcopy(provenance),'scores':{}}
+            cache['records'][slot]['scores'].update(good)
+        except (TypeError,ValueError,KeyError) as exc:
+            if source:cache['diagnostics'].append(f'{source} record {index}: {exc}; ignored')
 
 
 def load_pixel_cache(output):
-    cache={'protocols':{},'records':{}}
+    cache={'protocols':{},'records':{},'diagnostics':[]}
     if output.exists():
-        report=json.loads(output.read_text())
-        if not isinstance(report,dict) or not isinstance(report.get('results'),list):raise ValueError('Invalid existing pixel report; output preserved')
-        merge_pixel_cache(cache,report.get('protocol',{}),report['results'])
+        try:
+            report=json.loads(output.read_text())
+            if (not isinstance(report,dict) or not isinstance(report.get('results'),list)
+                    or not isinstance(report.get('protocol'),dict)):
+                raise ValueError('Invalid existing pixel report')
+            merge_pixel_cache(cache,report['protocol'],report['results'],source=output.name)
+        except (OSError,ValueError,TypeError) as exc:
+            cache['diagnostics'].append(f'{output.name}: {exc}; report cache ignored')
     path=cache_path(output)
     if path.exists():
-        saved=json.loads(path.read_text())
-        if saved.get('schema_version')!=1 or not isinstance(saved.get('protocols'),dict) or not isinstance(saved.get('records'),list):
-            raise ValueError('Invalid pixel resume cache; output preserved')
+        try:
+            saved=json.loads(path.read_text())
+            if (not isinstance(saved,dict) or saved.get('schema_version')!=1
+                    or not isinstance(saved.get('protocols'),dict) or not isinstance(saved.get('records'),list)):
+                raise ValueError('Invalid pixel resume cache')
+        except (OSError,ValueError,TypeError) as exc:
+            cache['diagnostics'].append(f'{path.name}: {exc}; sidecar cache ignored')
+            return cache
+        verified={}
         for key,protocol in saved['protocols'].items():
-            if _protocol_key(protocol)!=key:raise ValueError('Pixel cache protocol fingerprint mismatch')
-            cache['protocols'][key]=protocol
-        for record in saved['records']:
-            protocol=cache['protocols'].get(record.get('protocol_key'))
-            if protocol is None:raise ValueError('Pixel cache record has no protocol')
-            row={**record,**record.get('scores',{}),'metric_status':dict.fromkeys(record.get('scores',{}),'ok')}
-            merge_pixel_cache(cache,protocol,[row])
+            try:
+                if not isinstance(protocol,dict) or _protocol_key(protocol)!=key:
+                    raise ValueError('protocol fingerprint mismatch')
+                verified[key]=protocol
+            except (TypeError,ValueError) as exc:
+                cache['diagnostics'].append(f'{path.name}: {exc}; protocol {key} ignored')
+        for index,record in enumerate(saved['records']):
+            try:
+                if not isinstance(record,dict):raise ValueError('record must be an object')
+                protocol_key=record.get('protocol_key')
+                if not isinstance(protocol_key,str) or protocol_key not in verified:
+                    raise ValueError('record has no verified protocol')
+                scores=record.get('scores')
+                if not isinstance(scores,dict):raise ValueError('scores must be an object')
+                values={name:scores[name] for name in METRICS if name in scores}
+                row={**record,**values,'metric_status':dict.fromkeys(values,'ok')}
+                merge_pixel_cache(cache,verified[protocol_key],[row],source=f'{path.name} record {index}')
+            except (TypeError,ValueError,KeyError) as exc:
+                cache['diagnostics'].append(f'{path.name} record {index}: {exc}; ignored')
     return cache
 
 
@@ -310,7 +350,8 @@ def _evaluate(args):
         output={'status':status,'protocol':protocol,'attempted':len(results)-summary['pending'],
             'expected':len(results),'valid':summary['valid'],'failed':summary['failed'],'partial':summary['partial'],'pending':summary['pending'],
             'coverage':summary['coverage'],'complete':summary['complete'],'summary':summary,
-            'by_operation':groups('operation'),'by_domain':groups('domain'),'results':results,'resume':dict(resume)}
+            'by_operation':groups('operation'),'by_domain':groups('domain'),'results':results,'resume':dict(resume),
+            'resume_diagnostics':list(cache['diagnostics'])}
         _dump(args.output,output);return output
     checkpoint()
     initialized=False

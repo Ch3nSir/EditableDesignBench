@@ -69,15 +69,19 @@ python -m pip install -r requirements.lock.txt
 
 ### SenseNova
 
-SenseNova 使用官方原生推理包，需额外安装。已有官方推理环境时，也可以直接使用该环境生成，评分仍在 benchmark 环境执行。
+SenseNova 使用官方原生推理包，依赖与其他生成模型不同，建议独立环境；评分仍使用 benchmark 环境。在仓库根目录执行：
 
 ```bash
-git clone https://github.com/OpenSenseNova/SenseNova-U1.git
-pip install --no-deps -e SenseNova-U1
+conda create -n editabledesignbench-sensenova python=3.12 -y
+conda activate editabledesignbench-sensenova
+python -m pip install -r requirements.txt "git+https://github.com/OpenSenseNova/SenseNova-U1.git@94bf26c94ab7c30211dcc29466152d0302c7a262"
 python scripts/bench.py download --models sensenova-u1.5-8b-mot
 python scripts/bench.py generate --models sensenova-u1.5-8b-mot --all --output-root outputs/run1
+conda activate editabledesignbench
 python scripts/bench.py evaluate --runs-root outputs/run1 --models sensenova-u1.5-8b-mot --workers 2 --device cpu
 ```
+
+使用普通安装，不使用 `-e` 或跳过依赖检查；安装后不依赖源码目录继续存在。以上固定官方源码版本，模型权重版本及采样参数另由每次实验的 `protocol.json` 记录。资产轨生成添加 `--track asset` 并使用单独的输出目录。
 
 原生接口为 `it2i_generate`，使用官方 50 步、文本 CFG 4、图像 CFG 1、timestep shift 3、seed 42 和 SDPA。只输入当前原图及原始指令，不启用可选 Edit PE 或 think mode。输出尺寸显式设为原图补边后的尺寸；输入图保留原始像素，模型内部仍执行官方视觉编码预处理。输出张量按官方示例转换为 RGB PNG 并完整保留。当前适配需要模型完整驻留 GPU，不支持 `--cpu-offload`。
 
@@ -138,7 +142,7 @@ python scripts/bench.py compare --runs-root outputs/custom_smoke --models all
 
 资产评委每次只接收两张原生尺寸整图（原图、模型结果），以及原始指令和操作类型。不裁取或放大局部，不读取 mask、参考目标或生成素材。mask 继续用于像素指标。
 
-资产响应只检查 JSON、0–5 分数和必需证据字段的格式。`target_match`、`operation` 与分数矛盾，或四次独立请求的观察不同，都只产生复核标记；原始分数正常参与均值及联合合格率，不拒收、不调整分数、不因此重试。网络/API 或无法解析的响应仍会重试。响应校验策略为 `asset-response-structure-only-v1`，记录在报告的 `response_validation` 中，与评分 prompt 的版本分开。
+响应必须给出当前维度明确的 0–5 数字。缺少理由或辅助证据、标签大小写差异、证据与分数矛盾等只作诊断；原始分数正常参与均值及联合合格率，不拒收、不调整分数、不因此重试。接口返回长度上限标志但 JSON 完整时也正常接收。网络/API、实际截断或无法取得合法分数时仍重试。资产响应策略为 `asset-response-auxiliary-evidence-v2`，记录在报告的 `response_validation` 中，与评分 prompt 的版本分开。
 
 资产 MLLM 协议为 `editabledesignbench-asset-mllm-v4`。本版仅收紧资产评委 prompt 的评分锚点；输入、输出结构、解析与重试机制不变。旧版分数与新版分开缓存；重跑原命令会重新计算资产 MLLM 分数，并保留历史缓存。文字评委采用上述独立严格版协议，像素指标未改变。
 
@@ -195,7 +199,7 @@ python scripts/mllm_evaluate.py \
 
 如需配置 API 地址、凭据来源、超时或重试次数，可以创建自己的 JSON，通过 `evaluate --config path/to/judge.json` 传入。字段示例见 [judge.example.json](../config/judge.example.json)，其中 `request_profile=texteditbench` 固定使用上述参数。
 
-`reasoning_chat` 保留为显式可选的兼容配置，只有在 JSON 中指定时才启用。比较模型时应使用同一个评委和请求参数。
+若评委只支持 `max_completion_tokens` 等推理接口参数，可在 JSON 中显式选择 `reasoning_chat`，文字和资产轨均支持。实际参数会完整记录并隔离缓存；默认不会自动切换，仍使用 `temperature=0`、`max_tokens=500`。比较模型时应使用同一个评委和请求参数。
 
 也可以将 `OPENAI_API_KEY`、`OPENAI_API_URL`、`OPENAI_MODEL` 写入仓库根目录的 `.env`，每行 `变量名=值`。脚本自动读取，已导出的环境变量优先。不要提交自己的密钥。
 
@@ -219,12 +223,18 @@ RGBA 输出接受任意 Alpha 值，Alpha 仅用于诊断记录。评测输入�
 
 同一输出文件的 `.cache.json` 保存历史成功项，`.bak` 保留开始本轮前的报告。临时缺失的图片、子集测试或一次失败不会清掉历史成功项。改变图片、mask、评委或评分协议后，相应旧分数会失效；每个模型使用自己的结果与缓存目录。
 
+报告或部分缓存损坏时，会保留损坏原件并尝试从其余有效记录恢复，恢复情况写入诊断字段；只补算仍缺失的指标或维度。不能恢复的项保留失败状态，不补零。
+
 ```bash
 # 重新汇总已生成实验中的模型评分
 python scripts/bench.py compare --runs-root outputs/run1
 ```
 
-仅像素实验重新汇总时加 `--pixel-only`。汇总核对数据、任务集和评分协议；失败项保留错误与覆盖率，未覆盖完整任务集的指标均分为 `null`，不补零、不合成总分。
+仅像素实验重新汇总时加 `--pixel-only`。单个模型失败不会清空其他模型的有效结果。数据、任务集或评分协议不同的结果仍单独保留，但标记 `comparable=false`，不作直接排名；尚未评分完整的指标均分为 `null`，不补零、不合成总分。文字与资产两轨的 JSON/CSV 均报告四维联合合格率，文字的可选 SE 不参与四维联合判定。
+
+默认数据版本固定为 `v3.0.0`，合计 400 个任务。需要主动获取最新未固定版本时才使用 `python scripts/download_dataset.py --revision main --update`。实验报告记录数据、模型、评委和提示词版本；比较自己的结果时应使用相同任务及评测协议。
+
+生成实验中包含本次运行的文件路径。跨机器搬运原始生成目录后，不要直接沿用旧路径的评分缓存；已有同尺寸 RGB/RGBA 图片可用 README 的 `--predictions` 入口在新位置评分。带补边的原始图片需保留适配记录，不能直接缩放成原图尺寸。
 
 已有图片的评分会在 `results/<模型文件夹名>/` 输出 `pixel_scores.json` 和 `mllm_scores.json`；该入口直接评分，不创建内置生成器的多模型实验目录。可用 `--output-dir` 修改结果目录，或用 `--dry-run` 检查请求输入而不调用 API。
 

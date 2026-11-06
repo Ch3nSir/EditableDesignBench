@@ -155,6 +155,7 @@ class DatasetDownloadTests(unittest.TestCase):
             with contextlib.redirect_stdout(printed):
                 self.assertEqual(main(['--output-dir', str(destination), '--update']), 0)
         download.assert_called_once()
+        self.assertEqual(download.call_args.kwargs['revision'], 'v3.0.0')
         self.assertTrue(download.call_args.kwargs['force_download'])
         report = json.loads(printed.getvalue())
         self.assertEqual(report['status'], 'updated')

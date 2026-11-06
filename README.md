@@ -11,7 +11,7 @@
 
 文字集保留 200 个原始设计，每个设计 1 条任务，六种操作各 33–34 条。
 
-下面先用 Qwen-Image-2.1 跑通两轨各 20 例，再计算像素指标和 MLLM 分数。已有模型输出时可直接[评分自己的图片](#已有图片)。
+下面用 Qwen-Image-2.1 生成并评测完整 400 个任务，两条轨道分别运行、分别汇报。已有模型输出时可直接[评分自己的图片](#已有图片)。
 
 ## 1. 安装环境
 
@@ -39,22 +39,24 @@ python -m pip install -r requirements.txt
 python scripts/download_dataset.py
 ```
 
-自动下载、解压到 `data/EditableDesignBench-v3/`，其中根目录是文字集，`assets/` 是资产集。无需登录。新版使用独立目录，保留已有 400 条文字任务及其旧实验；更新当前目录的数据时添加 `--update`。
+默认下载固定发布版 `v3.0.0`，解压到 `data/EditableDesignBench-v3/`：根目录是 200 条文字任务，`assets/` 是 200 条资产任务。无需登录。
 
 ## 3. 生成图片
+
+生成前需安装与显卡驱动匹配的 CUDA 版 PyTorch，安装命令见[环境说明](docs/advanced.md#环境与依赖)。
 
 ```bash
 python -m pip install -r requirements-generation.txt
 python scripts/bench.py download --models qwen-image21
 
-# 文字集 20 例
-python scripts/bench.py generate --models qwen-image21 --sample 20 --output-root outputs/text20
+# 文字集：全部 200 例
+python scripts/bench.py generate --models qwen-image21 --all --output-root outputs/text
 
-# 资产集 20 例
-python scripts/bench.py generate --models qwen-image21 --track asset --sample 20 --output-root outputs/asset20
+# 资产集：全部 200 例
+python scripts/bench.py generate --models qwen-image21 --track asset --all --output-root outputs/assets
 ```
 
-将 `--sample 20` 换成 `--all` 即可运行所选轨道的全部 200 例。默认抽样种子为 42，按操作分层并优先选择不同原始设计。
+以上两条生成命令合计 400 例。生成需在当前进程能访问 CUDA GPU 的环境中执行；评分可以使用 CPU。
 
 替换 `--models` 即可使用其他[内置模型或自定义模型](docs/advanced.md#模型选择)；多个模型用逗号分隔。权重保存在 `models/`。受限模型需先在 Hugging Face 接受访问条件，再运行 `hf auth login`。
 
@@ -67,8 +69,8 @@ export OPENAI_API_KEY="your_api_key"
 export OPENAI_API_URL="https://your-provider.example/v1"
 export OPENAI_MODEL="your-vision-model"
 
-python scripts/bench.py evaluate --runs-root outputs/text20 --workers 10 --device cpu
-python scripts/bench.py evaluate --runs-root outputs/asset20 --workers 10 --device cpu
+python scripts/bench.py evaluate --runs-root outputs/text --workers 10 --device cpu
+python scripts/bench.py evaluate --runs-root outputs/assets --workers 10 --device cpu
 ```
 
 评分自动读取实验中的模型、任务名单和轨道。**只计算像素指标时，跳过 API 配置并在命令后添加 `--pixel-only`。** LPIPS 首次运行会自动下载感知网络权重，需要联网。
@@ -77,28 +79,35 @@ python scripts/bench.py evaluate --runs-root outputs/asset20 --workers 10 --devi
 
 ### 已有图片
 
-将输出保存为原图尺寸的 RGB PNG，按任务 ID 命名，如 `predictions/MyModel/000_delete.png`。安装基础依赖、下载数据并配置 API 后运行：
+将输出保存为原图尺寸的 RGB 或 RGBA PNG，按任务 ID 命名，如 `predictions/MyModel/000_delete.png`。RGBA 直接读取原始 RGB 通道，不合成背景、不修改文件。安装基础依赖、下载数据并配置 API 后运行：
 
 ```bash
 python scripts/bench.py evaluate --predictions predictions/MyModel --workers 10 --device cpu
 ```
 
-默认评分文字集全部 200 例；资产集添加 `--track asset`，子集用 `--ids ID1,ID2` 指定。结果保存在 `results/MyModel/`，也支持 `--pixel-only`。
+以上评分文字集全部 200 例。再对资产集输出运行一次，合计 400 例：
+
+```bash
+python scripts/bench.py evaluate --predictions predictions/MyModel_assets --track asset --workers 10 --device cpu
+```
+
+结果分别保存在 `results/MyModel/`、`results/MyModel_assets/`，也支持 `--pixel-only`。
 
 ## 查看结果
 
-生成实验的结果位于 `outputs/text20/` 或 `outputs/asset20/`：
+生成实验的结果位于 `outputs/text/` 或 `outputs/assets/`：
 
 | 文件 | 内容 |
 |---|---|
 | `<model>/pixel_scores.json` | MSE、PSNR、SSIM、LPIPS |
 | `<model>/mllm_scores.json` | 每例、每维度的 MLLM 分数和错误 |
+| `<model>/report.json` | 经过校验的指标、联合合格率和覆盖率 |
 | `<model>/comparison.png` | 原图、目标图与模型结果预览 |
 | `reports/comparison.csv` | 模型对比表 |
 
-像素指标复用 TextEditBench 的实现。MLLM 每例四次独立请求，每维 0–5 分，使用 `temperature=0`、`max_tokens=500`；20 例共 80 次请求，不含重试。文字轨默认用严格版 prompt 评 IF / TA / VC / LP，资产轨评 IF / OA / VC / LP，并报告四维均 ≥ 4 的联合合格率。两轨分开汇报；资产评委只接收原图和模型结果两张整图，不裁局部，两轨评委默认均不接收目标图。
+像素指标复用 TextEditBench 的实现。MLLM 每例四次独立请求，每维 0–5 分，使用 `temperature=0`、`max_tokens=500`；每模型完整 400 例共 1,600 次请求，不含重试。文字轨默认用严格版 prompt 评 IF / TA / VC / LP，资产轨评 IF / OA / VC / LP，并报告四维均 ≥ 4 的联合合格率。两轨分开汇报；资产评委只接收原图和模型结果两张整图，不裁局部，两轨评委默认均不接收目标图。
 
-资产评分逐维记录证据。分数与证据标签矛盾、或不同维度观察不一致时，仅标记供复核，仍接收原始分数并正常统计，不改分、不因此重试。联合合格率为主要成功指标，四维分数用于分析错误。资产评分是本项目扩展协议，具体规则见[进阶用法](docs/advanced.md)。
+合法的维度分数正常参与统计；缺少辅助说明、证据标签矛盾等只作记录，不改分、不因此重试。某个模型失败不清空其他模型的结果；不同实验协议的分数保留，但会标明不可直接比较。联合合格率为主要成功指标，四维分数用于分析错误。资产评分是本项目扩展协议，具体规则见[进阶用法](docs/advanced.md)。
 
 ## 许可证与引用
 

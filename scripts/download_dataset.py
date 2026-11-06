@@ -15,6 +15,7 @@ from PIL import Image
 from settings import DATASET_ROOT
 
 REPO_ID = 'yomi-chen/EditableDesignBench'
+DEFAULT_REVISION = 'v3.0.0'
 ARCHIVE_ROOT = 'EditableDesignBench'
 
 
@@ -212,7 +213,8 @@ def install_archive(archive, destination, *, update=False, backup_path=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output-dir', type=Path, default=DATASET_ROOT)
-    parser.add_argument('--revision', default='main', help='Hugging Face revision or commit')
+    parser.add_argument('--revision', default=DEFAULT_REVISION,
+                        help='Hugging Face revision or commit (default: published v3.0.0 release)')
     parser.add_argument('--update', action='store_true',
                         help='Verify the selected HF archive in staging, then back up and replace existing data')
     args = parser.parse_args(argv)

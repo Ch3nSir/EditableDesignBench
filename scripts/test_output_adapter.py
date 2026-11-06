@@ -96,10 +96,16 @@ class AdapterContract(unittest.TestCase):
             code,result=self.run_evaluator('--predictions',str(self.predictions),'--ids',ids)
             self.assertEqual(code,2);self.assertEqual(result['status'],'invalid_request')
 
-    def test_opaque_rgba_needs_explicit_export(self):
-        Image.fromarray(np.dstack([self.rgb,np.full((32,32),255,np.uint8)])).save(self.predictions/'a.png')
+    def test_external_rgba_evaluation_accepts_alpha_and_keeps_the_original_file(self):
+        prediction=self.predictions/'a.png'
+        Image.fromarray(np.dstack([self.rgb,np.full((32,32),0,np.uint8)])).save(prediction)
+        original=prediction.read_bytes()
         code,result=self.run_evaluator('--predictions',str(self.predictions))
-        self.assertEqual(code,1);self.assertIn('Expected RGB',result['results'][0]['error'])
+        self.assertEqual(code,0)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['summary']['metrics']['avg_mse'],0)
+        self.assertEqual(result['results'][0]['provenance']['mode'],'native_rgba_rgb_channels')
+        self.assertEqual(prediction.read_bytes(),original)
 
     def test_padded_rgba_export_preserves_raw_and_evaluates_native_roi(self):
         raw=self.raw();before=raw.read_bytes();export=self.root/'rgb.png'

@@ -1,5 +1,6 @@
 """Offline contract tests for the MLLM adapter. No API/network is used."""
 import ast
+import base64
 import contextlib
 import io
 import json
@@ -18,6 +19,21 @@ import mllm_evaluate as m
 
 
 class AdapterTests(unittest.TestCase):
+    def test_external_rgba_is_judged_without_alpha_compositing_or_file_changes(self):
+        prediction=self.root/'predictions/a.png'
+        Image.new('RGBA',(16,16),(0,0,255,0)).save(prediction)
+        original=prediction.read_bytes();payloads=[]
+        def transport(*values):
+            payloads.append(values[2]);return self.success(*values)
+        with patch.dict(os.environ,{'MOCK_JUDGE_KEY':'offline-fixture'}):
+            report,code=m.evaluate(self.args(),transport=transport)
+        self.assertEqual(code,0);self.assertEqual(report['summary']['scored'],1)
+        self.assertEqual(prediction.read_bytes(),original)
+        for payload in payloads:
+            urls=[v['image_url']['url'] for v in payload['messages'][1]['content'] if v['type']=='image_url']
+            with Image.open(io.BytesIO(base64.b64decode(urls[1].split(',',1)[1]))) as image:
+                self.assertEqual(image.mode,'RGB');self.assertEqual(image.getpixel((0,0)),(0,0,255))
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         (self.root/'cases/a').mkdir(parents=True);(self.root/'predictions').mkdir()
@@ -219,11 +235,77 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual([x['image_url']['url'] for x in msg[1]['content'] if x['type']=='image_url'],['source','prediction','reference'])
 
     def test_invalid_score_never_becomes_fake_zero(self):
-        for score in [True,-1,6,float('nan'),'4']:
+        for score in [True,-1,6,float('nan'),'4',10**400]:
             with self.assertRaises(m.JudgeError):m.parse_score(json.dumps({'IF':score,'rationale':'x'}),'IF')
         creds={'endpoint':'https://judge.example/v1/chat/completions','api_key':'x','model':'x','timeout':1,'max_retries':1}
         result=m.request_score('IF',[],creds,lambda *a:{'choices':[{'message':{'content':'bad'}}]},lambda _:None)
         self.assertEqual(result['status'],'error');self.assertIsNone(result['score']);self.assertEqual(result['attempts'],2)
+
+    def test_valid_score_at_token_limit_is_accepted_without_retry(self):
+        credentials={'endpoint':'https://judge.invalid/v1','api_key':'offline',
+                     'model':'offline-judge','timeout':1,'max_retries':2}
+        for asset_response in (False,True):
+            with self.subTest(asset_response=asset_response):
+                transport=Mock(return_value={'choices':[{'message':{'content':json.dumps({
+                    'IF':4,'rationale':'Complete JSON at the limit.'})},'finish_reason':'length'}]})
+                result=m.request_score('IF',[],credentials,transport,lambda _:self.fail('Valid score was retried'),
+                                       asset_response=asset_response)
+                self.assertEqual(result['status'],'scored');self.assertEqual(result['score'],4)
+                self.assertEqual(result['attempts'],1);self.assertEqual(transport.call_count,1)
+                self.assertIn('finish_reason_length_with_valid_score',result['response_diagnostics'])
+
+    def test_explicit_provider_content_forms_are_parsed_without_guessing_scores(self):
+        payload={'IF':4,'rationale':'Visible result.'}
+        for content in (payload,[{'type':'output_text','text':json.dumps(payload)}],
+                        [{'type':'text','text':'{"IF":4,'},
+                         {'type':'output_text','text':'"rationale":"Visible result."}'},
+                         {'type':'reasoning','text':'Ignored provider metadata.'}]):
+            with self.subTest(content=content):self.assertEqual(m.parse_score(content,'IF'),payload)
+        for content in ('The score is 4.',{'TA':4},[{'type':'output_text','text':'IF = 4'}]):
+            with self.subTest(content=content),self.assertRaises(m.JudgeError):m.parse_score(content,'IF')
+
+    def test_missing_empty_or_invalid_rationale_is_diagnostic_and_never_invented(self):
+        for fields,expected,diagnostic in (({},None,'judge_rationale_missing'),
+                ({'rationale':None},None,'judge_rationale_missing'),
+                ({'rationale':''},'','judge_rationale_empty'),
+                ({'rationale':'  '},'  ','judge_rationale_empty'),
+                ({'rationale':42},None,'judge_rationale_invalid_type')):
+            with self.subTest(fields=fields):
+                parsed=m.parse_score({'IF':4,**fields},'IF')
+                self.assertEqual(parsed['IF'],4);self.assertEqual(parsed['rationale'],expected)
+                self.assertEqual(parsed['response_diagnostics'],[diagnostic])
+
+    def test_score_only_text_response_is_reusable_and_accepted_by_formal_validation(self):
+        from formal_report import _judge_values
+        def transport(*values):
+            result=self.success(*values)
+            content=json.loads(result['choices'][0]['message']['content']);content.pop('rationale')
+            result['choices'][0]['message']['content']=[{'type':'output_text','text':json.dumps(content)}]
+            return result
+        with patch.dict(os.environ,{'MOCK_JUDGE_KEY':'offline-fixture'},clear=True):
+            report,code=m.evaluate(self.args(),transport,lambda _:None)
+            self.assertEqual(code,0);self.assertEqual(report['api_calls_made'],4)
+            for value in report['results'][0]['dimensions'].values():
+                if value['status']=='scored':
+                    self.assertIsNone(value['rationale'])
+                    self.assertEqual(value['response_diagnostics'],['judge_rationale_missing'])
+            _,complete=_judge_values(report,['a'],{'a':self.task})
+            self.assertTrue(complete)
+            resumed,code=m.evaluate(self.args(),lambda *a:self.fail('Score-only response repeated API requests'))
+        self.assertEqual(code,0);self.assertEqual(resumed['api_calls_made'],0)
+
+    def test_truncated_json_at_token_limit_retries_and_never_fabricates_a_score(self):
+        credentials={'endpoint':'https://judge.invalid/v1','api_key':'offline',
+                     'model':'offline-judge','timeout':1,'max_retries':1}
+        truncated={'choices':[{'message':{'content':'{"IF":4,"rationale":"unfinished'},'finish_reason':'length'}]}
+        valid={'choices':[{'message':{'content':'{"IF":4,"rationale":"Complete."}'},'finish_reason':'stop'}]}
+        transport=Mock(side_effect=[truncated,valid]);delays=[]
+        result=m.request_score('IF',[],credentials,transport,delays.append)
+        self.assertEqual(result['status'],'scored');self.assertEqual(result['attempts'],2)
+        self.assertEqual(transport.call_count,2);self.assertEqual(delays,[1])
+        result=m.request_score('IF',[],credentials,lambda *a:truncated,lambda _:None)
+        self.assertEqual(result['status'],'error');self.assertIsNone(result['score'])
+        self.assertEqual(result['attempts'],2);self.assertIn('token limit',result['error'])
 
     def test_resume_uses_input_and_prediction_hashes(self):
         calls=[]
@@ -282,7 +364,7 @@ class AdapterTests(unittest.TestCase):
         output=self.root/'scores.json';cache=m.cache_path(output)
         before=(output.read_bytes(),cache.read_bytes())
         config_before=self.config.read_bytes()
-        for failure in ('id','config','manifest','corrupt_report'):
+        for failure in ('id','config','manifest'):
             with self.subTest(failure=failure):
                 extra=[]
                 if failure=='id':extra=['--ids','unknown']
@@ -292,7 +374,6 @@ class AdapterTests(unittest.TestCase):
                     # Mutually exclusive CLI options are validated by argparse;
                     # use direct evaluate + main's error handler for this case.
                     args=self.args();args.predictions=None;args.generation_manifest=self.root/'missing-manifest.json'
-                if failure=='corrupt_report':output.write_text('{corrupted')
                 preserved=(output.read_bytes(),cache.read_bytes())
                 with patch.object(m,'post_json',side_effect=AssertionError('API called')):
                     if failure=='manifest':
@@ -304,6 +385,64 @@ class AdapterTests(unittest.TestCase):
                 self.assertEqual((output.read_bytes(),cache.read_bytes()),preserved)
                 self.assertTrue(json.loads((self.root/'scores.json.error.json').read_text())['evaluation_output_preserved'])
                 self.config.write_bytes(config_before);output.write_bytes(before[0])
+
+    def test_corrupt_report_or_sidecar_recovers_other_source_without_repeating_paid_scores(self):
+        with patch.dict(os.environ,{'MOCK_JUDGE_KEY':'offline-fixture'},clear=True):
+            m.evaluate(self.args(),self.success,lambda _:None)
+            output=self.root/'scores.json';sidecar=m.cache_path(output)
+            for damaged in (output,sidecar):
+                with self.subTest(damaged=damaged.name):
+                    damaged.write_bytes(b'{interrupted JSON')
+                    before=damaged.read_bytes()
+                    report,code=m.evaluate(self.args(),lambda *a:self.fail('Recoverable scores repeated API requests'))
+                    self.assertEqual(code,0);self.assertEqual(report['api_calls_made'],0)
+                    self.assertEqual(report['resume']['cached_dimensions'],4)
+                    issues=report['storage']['cache_recovery']
+                    self.assertEqual(len(issues),1);self.assertEqual(issues[0]['source'],str(damaged))
+                    self.assertIn('Invalid JSON',issues[0]['error'])
+                    preserved=Path(issues[0]['preserved_file'])
+                    self.assertEqual(preserved.read_bytes(),before)
+                    m.evaluate(self.args(),lambda *a:self.fail('Healthy recovered cache repeated API requests'))
+                    self.assertEqual(preserved.read_bytes(),before)
+
+    def test_bad_cache_records_and_dimensions_only_retry_unrecoverable_dimensions(self):
+        self.add_second_task()
+        with patch.dict(os.environ,{'MOCK_JUDGE_KEY':'offline-fixture'},clear=True):
+            m.evaluate(self.args(),self.success,lambda _:None)
+            output=self.root/'scores.json';sidecar=m.cache_path(output)
+            data=json.loads(sidecar.read_text());first=data['records'][0]
+            first['dimensions']['IF']['score']='4'
+            first['dimensions']['BROKEN']={'status':'scored','score':4,'rationale':'Invalid dimension.'}
+            first['dimensions']['malformed']='not an object'
+            data['records'].insert(0,None)
+            data['records'].insert(1,{'id':'bad','fingerprint':'invalid','dimensions':{}})
+            sidecar.write_text(json.dumps(data));original=sidecar.read_bytes()
+            output.write_bytes(b'{interrupted report')
+            report,code=m.evaluate(self.args(),self.success,lambda _:None)
+        self.assertEqual(code,0);self.assertEqual(report['api_calls_made'],1)
+        self.assertEqual(report['resume']['cached_dimensions'],7)
+        self.assertEqual(report['summary']['scored'],2)
+        issues=report['storage']['cache_recovery']
+        self.assertEqual(len(issues),6)
+        self.assertTrue(any(issue.get('dimension')=='IF' for issue in issues))
+        sidecar_issues=[issue for issue in issues if issue['source']==str(sidecar)]
+        self.assertEqual(len({issue['preserved_file'] for issue in sidecar_issues}),1)
+        self.assertEqual(Path(sidecar_issues[0]['preserved_file']).read_bytes(),original)
+        recovered=json.loads(sidecar.read_text())
+        self.assertEqual(len(recovered['records']),2)
+        self.assertTrue(all(len(record['dimensions'])==4 for record in recovered['records']))
+
+    def test_invalid_newer_cached_dimension_keeps_valid_report_fallback(self):
+        with patch.dict(os.environ,{'MOCK_JUDGE_KEY':'offline-fixture'},clear=True):
+            m.evaluate(self.args(),self.success,lambda _:None)
+            output=self.root/'scores.json';sidecar=m.cache_path(output)
+            data=json.loads(sidecar.read_text())
+            data['records'][0]['dimensions']['IF']['score']=False
+            sidecar.write_text(json.dumps(data))
+            report,code=m.evaluate(self.args(),lambda *a:self.fail('Valid report fallback repeated API requests'))
+        self.assertEqual(code,0);self.assertEqual(report['api_calls_made'],0)
+        self.assertEqual(report['results'][0]['dimensions']['IF']['score'],4)
+        self.assertEqual(report['storage']['cache_recovery'][0]['dimension'],'IF')
 
     def test_temporary_prediction_failure_retains_paid_cache_without_reusing_invalid_input(self):
         calls=[]
